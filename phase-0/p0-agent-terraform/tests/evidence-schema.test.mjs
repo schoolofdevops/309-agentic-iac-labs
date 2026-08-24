@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -53,5 +53,17 @@ test('provides a reproducible Terraform defect for a governed repair task', () =
   assert.match(
     validate.stdout + validate.stderr,
     /Reference to undeclared resource/,
+  );
+});
+
+test('requires the repair to preserve the generated platform identifier', () => {
+  const task = readFileSync(
+    fileURLToPath(new URL('../task.md', import.meta.url)),
+    'utf8',
+  );
+
+  assert.match(
+    task,
+    /Keep `output\.platform_name` backed by `random_id\.platform\.hex`;/,
   );
 });

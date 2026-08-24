@@ -3,6 +3,9 @@
 ## Objective
 
 Repair the Terraform configuration so `terraform fmt -check` and `terraform validate` pass.
+Keep `output.platform_name` backed by `random_id.platform.hex`; restore the
+missing declaration instead of replacing the generated identifier with a fixed
+literal.
 
 ## Allowed scope
 
