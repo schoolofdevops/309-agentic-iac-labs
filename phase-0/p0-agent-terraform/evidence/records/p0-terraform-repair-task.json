@@ -1,0 +1,14 @@
+{
+  "id": "p0-terraform-repair-task",
+  "kind": "task",
+  "source": "phase-0/p0-agent-terraform/task.md",
+  "authoring_run": "p0-codex-adapter-2026-08-24",
+  "version": "1",
+  "relations": [
+    {
+      "predicate": "PRODUCED",
+      "target": "p0-terraform-repair-artifact",
+      "source": "phase-0/p0-agent-terraform/task.md"
+    }
+  ]
+}

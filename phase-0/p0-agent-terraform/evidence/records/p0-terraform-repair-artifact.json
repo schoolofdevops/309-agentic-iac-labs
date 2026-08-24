@@ -1,0 +1,14 @@
+{
+  "id": "p0-terraform-repair-artifact",
+  "kind": "artifact",
+  "source": "phase-0/p0-agent-terraform/fixtures/broken-module/main.tf",
+  "authoring_run": "p0-codex-adapter-2026-08-24",
+  "version": "1",
+  "relations": [
+    {
+      "predicate": "DERIVED_FROM",
+      "target": "p0-terraform-repair-task",
+      "source": "phase-0/p0-agent-terraform/task.md"
+    }
+  ]
+}
