@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "P0 governed-change evidence record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "kind", "source", "authoring_run", "version"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{2,63}$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["task", "source", "claim", "artifact", "evaluation", "observation", "commit"]
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authoring_run": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["predicate", "target", "source"],
+        "properties": {
+          "predicate": {
+            "type": "string",
+            "enum": ["DEPENDS_ON", "SUPPORTS", "CONTRADICTS", "DERIVED_FROM", "PRODUCED", "EVALUATES", "REVISES", "PARENT_OF"]
+          },
+          "target": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{2,63}$"
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}
