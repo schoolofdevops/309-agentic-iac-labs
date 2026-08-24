@@ -1,0 +1,14 @@
+{
+  "id": "p0-governed-repair-task",
+  "kind": "task",
+  "source": "phase-0/p0-agent-terraform/task.md: repair the undeclared random_id.platform reference in fixtures/broken-module/main.tf; stop after validation and do not run apply.",
+  "authoring_run": "p0-governed-repair-run",
+  "version": "1",
+  "relations": [
+    {
+      "predicate": "PRODUCED",
+      "target": "p0-governed-repair-artifact",
+      "source": "The task authorizes only the fixture repair and evidence records."
+    }
+  ]
+}

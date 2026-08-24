@@ -1,0 +1,19 @@
+{
+  "id": "p0-governed-repair-artifact",
+  "kind": "artifact",
+  "source": "phase-0/p0-agent-terraform/fixtures/broken-module/main.tf: added the smallest local configuration for random_id.platform: a hashicorp/random provider requirement and a random_id resource with byte_length = 4.",
+  "authoring_run": "p0-governed-repair-run",
+  "version": "1",
+  "relations": [
+    {
+      "predicate": "DERIVED_FROM",
+      "target": "p0-governed-repair-task",
+      "source": "The added provider and resource resolve the exact previously undeclared random_id.platform output reference."
+    },
+    {
+      "predicate": "EVALUATES",
+      "target": "p0-governed-repair-evaluation",
+      "source": "The repaired artifact is the subject of formatting and validation."
+    }
+  ]
+}

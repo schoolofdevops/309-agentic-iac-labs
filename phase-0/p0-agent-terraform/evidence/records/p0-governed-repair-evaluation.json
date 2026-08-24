@@ -1,0 +1,14 @@
+{
+  "id": "p0-governed-repair-evaluation",
+  "kind": "evaluation",
+  "source": "In phase-0/p0-agent-terraform/fixtures/broken-module, terraform fmt -check passed. terraform validate passed after local terraform init -backend=false -input=false installed hashicorp/random. tofu init -backend=false -input=false and tofu validate passed after its separate local provider initialization. No terraform apply or tofu apply was run.",
+  "authoring_run": "p0-governed-repair-run",
+  "version": "1",
+  "relations": [
+    {
+      "predicate": "EVALUATES",
+      "target": "p0-governed-repair-artifact",
+      "source": "Formatting and local validation test the repaired configuration without creating infrastructure."
+    }
+  ]
+}
