@@ -1,7 +1,7 @@
 # P1 Floci Compatibility Evidence
 
 **Run date:** 2026-08-24  
-**Environment:** development machine only; not the declared 8 GB learner baseline  
+**Environment:** host meets the published minimum profile; active-workload samples recorded separately
 **Endpoint:** `http://localhost.floci.io:4566`  
 **Emulator:** Floci 1.7.0  
 **Provider:** `hashicorp/aws` 6.61.0
@@ -52,9 +52,18 @@ lock-file handling or a documented tool-specific checkout.
 Read assertions used the installed `aws` CLI with explicit local endpoint and
 test credentials instead.
 
+## Low-resource observation
+
+On 24 August 2026, Floci was sampled with `docker stats --no-stream` while
+the eight-resource local lifecycle was active. Samples ranged from 209.1 MiB
+at ready state to 221 MiB during the scoped destroy. The observed samples are
+below the 4 GiB active-workload budget. A continuous peak capture is still
+required before this profile is marked fully supported.
+
 ## Not proven
 
-- This is development-host evidence, not 8 GB baseline evidence.
+- A continuous active-workload peak has not yet been captured for the 7 GB
+  minimum-profile claim.
 - A CloudWatch metric/alarm resource was not tested. The log-group resource
   passed; metric/alarm support remains an explicit follow-up check.
 - Timings include Floci's approximately 25-second SQS create/update and
