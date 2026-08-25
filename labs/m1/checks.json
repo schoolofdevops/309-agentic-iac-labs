@@ -1,0 +1,25 @@
+{
+  "checks": [
+    {
+      "id": "section-1-preflight-completes",
+      "describe": "the local-first Section 1 preflight completes successfully",
+      "run": "bash section-1/scripts/preflight.sh",
+      "assert": {"exit": 0},
+      "weight": 3
+    },
+    {
+      "id": "section-1-preflight-reports-baseline",
+      "describe": "the preflight reports the supported 7 GB baseline",
+      "run": "bash section-1/scripts/preflight.sh",
+      "assert": {"contains": "7 GB RAM course baseline"},
+      "weight": 2
+    },
+    {
+      "id": "section-1-preflight-is-safe",
+      "describe": "the preflight source has no workload start or infrastructure apply command",
+      "run": "node --test section-1/tests/preflight.test.mjs",
+      "assert": {"exit": 0},
+      "weight": 3
+    }
+  ]
+}
