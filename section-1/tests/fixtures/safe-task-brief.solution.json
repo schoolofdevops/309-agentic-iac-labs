@@ -1,0 +1,9 @@
+{
+  "objective": "Repair the missing provider declaration and validate the module without applying infrastructure.",
+  "allowed_files": ["phase-0/p0-agent-terraform/fixtures/broken-module/main.tf"],
+  "allowed_tools": ["git diff", "terraform fmt -check", "terraform init -backend=false", "terraform validate", "tofu init -backend=false", "tofu validate"],
+  "forbidden_actions": ["terraform or tofu apply", "Terraform or OpenTofu state commands", "delete or destroy resources", "edit any other file"],
+  "required_evidence": ["Git diff for the allowed file", "Terraform validation output", "OpenTofu validation output"],
+  "stop_conditions": ["both validations pass", "two repair attempts fail", "the repair requires another file"],
+  "human_approval_required_for": ["apply, state, delete, or destroy actions"]
+}

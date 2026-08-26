@@ -1,0 +1,9 @@
+{
+  "objective": "TODO",
+  "allowed_files": [],
+  "allowed_tools": [],
+  "forbidden_actions": [],
+  "required_evidence": [],
+  "stop_conditions": [],
+  "human_approval_required_for": []
+}

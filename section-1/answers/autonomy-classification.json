@@ -1,0 +1,10 @@
+[
+  {"id":"manual-plan-review","classification":"TODO","reason":"TODO"},
+  {"id":"provider-suggestion","classification":"TODO","reason":"TODO"},
+  {"id":"read-only-plan","classification":"TODO","reason":"TODO"},
+  {"id":"bounded-repair","classification":"TODO","reason":"TODO"},
+  {"id":"approved-apply","classification":"TODO","reason":"TODO"},
+  {"id":"scheduled-observer","classification":"TODO","reason":"TODO"},
+  {"id":"unapproved-delete","classification":"TODO","reason":"TODO"},
+  {"id":"broad-credentials","classification":"TODO","reason":"TODO"}
+]

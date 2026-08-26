@@ -44,4 +44,4 @@ else
   printf 'NOTE     run this script from the 309-agentic-iac-labs repository root\n'
 fi
 
-printf '\nPASS     preflight complete; choose any compatible coding agent for later labs.\n'
+printf '\nPASS     preflight complete; workspace is ready for bounded agent tasks.\n'
