@@ -8,6 +8,10 @@ The project grows from a governed Terraform repair into a Production AI Workload
 
 Phase 0 viability validation is in progress. Learner labs, module checkpoints, and tags will be published only after their associated resource profile has direct validation evidence.
 
+## Available learner labs
+
+- [Section 2: Governed Terraform Repair](section-2/README.md)
+
 ## Planned learner checkpoints
 
 Module tags will follow the pattern `m01-start` / `m01-complete` through `m13-start` / `m13-complete`.

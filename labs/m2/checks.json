@@ -1,0 +1,11 @@
+{
+  "checks": [
+    {
+      "id": "section-2-repair-contract",
+      "describe": "the Section 2 starter and task preserve the governed repair boundary",
+      "run": "node --test section-2/tests/repair-contract.test.mjs",
+      "assert": {"exit": 0},
+      "weight": 3
+    }
+  ]
+}
