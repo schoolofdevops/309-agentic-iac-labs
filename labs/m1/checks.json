@@ -2,16 +2,23 @@
   "checks": [
     {
       "id": "section-1-preflight-completes",
-      "describe": "the local-first Section 1 preflight completes successfully",
+      "describe": "the local-first Section 1 preflight completes without blocking learners",
       "run": "bash section-1/scripts/preflight.sh",
       "assert": {"exit": 0},
       "weight": 3
     },
     {
-      "id": "section-1-preflight-reports-baseline",
-      "describe": "the preflight reports the supported 7 GB baseline",
+      "id": "section-1-preflight-reports-reference-profile",
+      "describe": "the preflight reports the tested reference profile as guidance",
       "run": "bash section-1/scripts/preflight.sh",
-      "assert": {"contains": "7 GB RAM course baseline"},
+      "assert": {"contains": "tested reference profile"},
+      "weight": 2
+    },
+    {
+      "id": "section-1-preflight-discovers-coding-agents",
+      "describe": "the preflight reports optional coding-agent availability",
+      "run": "bash section-1/scripts/preflight.sh",
+      "assert": {"contains": "Coding agents and interfaces (optional)"},
       "weight": 2
     },
     {

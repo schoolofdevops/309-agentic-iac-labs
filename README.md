@@ -2,7 +2,7 @@
 
 Public learner lab repository for the School of DevOps & AI course **Agentic Infrastructure as Code**.
 
-The project grows from a governed Terraform repair into a Production AI Workload Platform. The core learner path must remain runnable on a machine with at least 7 GB RAM, four logical CPUs, and 20 GB free disk, without a GPU, paid cloud account, or model API key. Docker may have more configured capacity; each active core-lab workload must measure at or below 4 GiB.
+The project grows from a governed Terraform repair into a Production AI Workload Platform. The course is tested against a reference machine with 7 GB RAM, four logical CPUs, and 20 GB free disk, without a GPU, paid cloud account, or model API key. The Section 1 preflight warns and continues when a learner has less capacity. Each active core-lab workload must measure at or below 4 GiB.
 
 ## Current status
 
