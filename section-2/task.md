@@ -28,6 +28,14 @@ tofu validate -no-color
 Capture the validation output and the final diff for your review. Stop after
 validation.
 
+## About the provider lock file
+
+This disposable dual-tool repair fixture intentionally ignores
+`.terraform.lock.hcl`: Terraform and OpenTofu may rewrite provider source metadata
+differently. Record any warning. You must not claim that a shared lock file
+proves compatibility. Real deployable modules normally commit their lock file;
+provider-lock workflows are taught later.
+
 ## Do not
 
 - Run `terraform apply` or `tofu apply`.

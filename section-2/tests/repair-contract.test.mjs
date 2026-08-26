@@ -62,6 +62,20 @@ test('bounds the Section 2 repair to one file and safe validation', () => {
   assert.doesNotMatch(source, /\b(?:Codex|Claude|Hermes)\b/);
 });
 
+test('explains the disposable dual-tool provider lock-file boundary', () => {
+  const source = readFileSync(task, 'utf8');
+
+  assert.match(source, /\.terraform\.lock\.hcl/);
+  assert.match(source, /provider source metadata/i);
+  assert.match(source, /record any warning/i);
+  assert.match(
+    source,
+    /must not claim[\s\S]*shared lock file[\s\S]*proves compatibility/i,
+  );
+  assert.match(source, /deployable modules normally commit their lock file/i);
+  assert.match(source, /provider-lock workflows are taught later/i);
+});
+
 test('keeps the Section 1 handoff aligned to the Section 2 task', () => {
   const source = readFileSync(sectionOneBrief, 'utf8');
   assert.match(source, /\.\.\/\.\.\/section-2\/task\.md/);
