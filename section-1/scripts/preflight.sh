@@ -28,8 +28,8 @@ done
 
 git --version
 docker version --format 'Docker server {{.Server.Version}}'
-terraform version | head -n 1
-tofu version | head -n 1
+terraform version | sed -n '1p'
+tofu version | sed -n '1p'
 
 ram="$(memory_bytes)"
 if [ "$ram" -lt "$minimum_ram_bytes" ]; then
