@@ -85,8 +85,8 @@ if (requiredSources.some((sourceId) => !pack.includes(sourceId))) {
 }
 
 if (
-  /SRC-ISSUE-184[^\n]*SELECTED/i.test(pack) ||
-  !/SRC-ISSUE-184[^\n]*QUARANTINED/i.test(pack)
+  /^-\s+`SRC-ISSUE-184`\s+—\s+SELECTED\b/im.test(pack) ||
+  !/^-\s+`SRC-ISSUE-184`\s+—\s+QUARANTINED\b/im.test(pack)
 ) {
   problems.push(
     'retrieval/context-pack.md [sources.untrusted]: Remove Issue 184 from selected context and record its instruction as quarantined input.',
