@@ -7,11 +7,11 @@ const root = new URL('../', import.meta.url);
 const read = (name) => readFileSync(new URL(name, root), 'utf8');
 
 test('freezes one plan-only Section 8 task and evidence pyramid', () => {
-  for (const path of ['request.md', 'task.md', 'starter/main.tf', 'starter/tests/foundation.tftest.hcl', 'policy/public_access.rego', 'policy/public_access_test.rego', 'adversarial/incoming-request.md']) {
+  for (const path of ['README.md', 'request.md', 'task.md', 'starter/main.tf', 'starter/tests/foundation.tftest.hcl', 'policy/public_access.rego', 'policy/public_access_test.rego', 'adversarial/incoming-request.md', 'challenge/plan-review.md', 'challenge/task.md', 'challenge/answer-key.md']) {
     assert.equal(existsSync(new URL(path, root)), true, `missing ${path}`);
   }
   const task = read('task.md');
-  for (const gate of ['format', 'validation', 'contract', 'lint', 'security', 'policy', 'cost', 'redaction', 'agent safety']) assert.match(task, new RegExp(gate, 'i'));
+  for (const gate of ['format', 'validation', 'contract', 'plan', 'lint', 'security', 'policy', 'cost', 'redaction', 'agent safety']) assert.match(task, new RegExp(gate, 'i'));
   assert.match(task, /No apply, destroy, cloud API, remote backend, or paid cost query/i);
 });
 
