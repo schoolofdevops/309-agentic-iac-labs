@@ -87,3 +87,20 @@ test('reports exactly the three intentional starter findings', () => {
   assert.match(result.stdout, /output\.sensitivity/);
   assert.match(result.stdout, /identity\.scope/);
 });
+
+test('provides a fixed local lifecycle and guarded cleanup', () => {
+  const lifecycle = read('scripts/run-local-lifecycle.mjs');
+  const cleanup = read('scripts/cleanup-local-run.mjs');
+  assert.match(lifecycle, /engine must be terraform or tofu/);
+  assert.match(lifecycle, /endpoint must be the approved local Floci endpoint/);
+  assert.match(lifecycle, /shell: false/);
+  assert.match(lifecycle, /-backend=false/);
+  assert.match(lifecycle, /refactor plan did not report the declared move/);
+  assert.match(lifecycle, /0 to add, 1 to change, 0 to destroy/);
+  assert.match(lifecycle, /human_approval_required: true/);
+  assert.ok(!lifecycle.includes("['state', 'mv'"));
+  assert.ok(!lifecycle.includes("['import'"));
+  assert.match(cleanup, /\.section-7-run/);
+  assert.match(cleanup, /lifecycle-evidence\.json/);
+  assert.doesNotMatch(cleanup, /rmSync\([^,]+,\s*\{recursive:\s*true,\s*force:\s*true/);
+});
