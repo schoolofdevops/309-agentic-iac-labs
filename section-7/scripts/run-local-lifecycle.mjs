@@ -33,7 +33,9 @@ const workspace = path.join(output, 'workspace');
 fs.cpSync(source, workspace, {recursive: true});
 const finalMain = fs.readFileSync(path.join(workspace, 'main.tf'), 'utf8');
 const finalMoved = fs.readFileSync(path.join(workspace, 'moved.tf'), 'utf8');
+const finalOutputs = fs.readFileSync(path.join(workspace, 'outputs.tf'), 'utf8');
 fs.copyFileSync(path.resolve('section-7/refactor-before/main.tf'), path.join(workspace, 'main.tf'));
+fs.copyFileSync(path.resolve('section-7/refactor-before/outputs.tf'), path.join(workspace, 'outputs.tf'));
 fs.rmSync(path.join(workspace, 'moved.tf'));
 
 const childEnv = {
@@ -80,6 +82,7 @@ const initialState = run('initial-state', engine, ['state', 'list', '-no-color']
 
 fs.writeFileSync(path.join(workspace, 'main.tf'), finalMain);
 fs.writeFileSync(path.join(workspace, 'moved.tf'), finalMoved);
+fs.writeFileSync(path.join(workspace, 'outputs.tf'), finalOutputs);
 const refactorPlan = run('refactor-plan', engine, ['plan', '-input=false', '-no-color', '-out=refactor.tfplan', ...common]);
 if (!refactorPlan.includes('has moved to')) reject('refactor plan did not report the declared move');
 run('refactor-apply', engine, ['apply', '-input=false', '-no-color', '-auto-approve', 'refactor.tfplan']);
