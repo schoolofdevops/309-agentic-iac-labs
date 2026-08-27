@@ -6,7 +6,7 @@ The project grows from a governed Terraform repair into a Production AI Workload
 
 ## Current status
 
-Sections 2, 3, 4, and 5 are available as learner labs. Each lab is published only
+Sections 2 through 6 are available as learner labs. Each lab is published only
 after its local checks and resource profile have direct validation evidence.
 
 ## Available learner labs
