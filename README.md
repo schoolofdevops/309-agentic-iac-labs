@@ -6,11 +6,13 @@ The project grows from a governed Terraform repair into a Production AI Workload
 
 ## Current status
 
-Phase 0 viability validation is in progress. Learner labs, module checkpoints, and tags will be published only after their associated resource profile has direct validation evidence.
+Sections 2 and 3 are available as learner labs. Each lab is published only
+after its local checks and resource profile have direct validation evidence.
 
 ## Available learner labs
 
 - [Section 2: Governed Terraform Repair](section-2/README.md)
+- [Section 3: Plan Your IaC Change Before the Agent Writes Code](section-3/README.md)
 
 ## Planned learner checkpoints
 
