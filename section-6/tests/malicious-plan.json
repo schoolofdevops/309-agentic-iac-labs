@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "intent": "Attempt a path escape.",
+  "context": ["context/selected.md"],
+  "operations": [
+    {
+      "type": "write",
+      "path": "../escape.md",
+      "content": "must not be written\n"
+    }
+  ],
+  "validation_repeats": 1,
+  "retry_limit": 0
+}

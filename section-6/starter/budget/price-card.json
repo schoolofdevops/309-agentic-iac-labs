@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "label": "Fixed course estimate; not provider billing",
+  "input_usd_per_million_tokens": 2,
+  "output_usd_per_million_tokens": 8,
+  "token_estimate_method": "ceil UTF-8 bytes divided by 4"
+}

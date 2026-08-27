@@ -15,7 +15,10 @@ function runNode(args) {
   return spawnSync(process.execPath, args, {
     cwd: section,
     encoding: 'utf8',
-    env: {PATH: process.env.PATH ?? ''},
+    env: {
+      PATH: process.env.PATH ?? '',
+      TMPDIR: process.env.TMPDIR ?? tmpdir(),
+    },
   });
 }
 
