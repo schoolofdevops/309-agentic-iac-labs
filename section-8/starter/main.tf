@@ -3,33 +3,29 @@ variable "prefix" {
   default = "s8-course"
 }
 
-variable "unused_environment" {
-  type    = string
-  default = "development"
-}
-
 resource "aws_s3_bucket" "artifacts" {
   bucket = "${var.prefix}-artifacts"
 
   tags = {
-    Owner = ""
+    Owner = "course-platform-team"
   }
 }
 
 resource "aws_s3_bucket_public_access_block" "artifacts" {
   bucket = aws_s3_bucket.artifacts.id
 
-  block_public_acls       = false
-  block_public_policy     = false
-  ignore_public_acls      = false
-  restrict_public_buckets = false
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
 }
 
 resource "aws_sqs_queue" "jobs" {
-  name = "${var.prefix}-jobs"
+  name                    = "${var.prefix}-jobs"
+  sqs_managed_sse_enabled = true
 
   tags = {
-    Owner = ""
+    Owner = "course-platform-team"
   }
 }
 
@@ -47,8 +43,18 @@ resource "aws_iam_role" "worker" {
 
 data "aws_iam_policy_document" "worker" {
   statement {
-    actions   = ["*"]
-    resources = ["*"]
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "sqs:DeleteMessage",
+      "sqs:ReceiveMessage",
+      "sqs:SendMessage",
+    ]
+    resources = [
+      aws_s3_bucket.artifacts.arn,
+      "${aws_s3_bucket.artifacts.arn}/*",
+      aws_sqs_queue.jobs.arn,
+    ]
   }
 }
 
@@ -56,8 +62,4 @@ resource "aws_iam_role_policy" "worker" {
   name   = "${var.prefix}-worker"
   role   = aws_iam_role.worker.id
   policy = data.aws_iam_policy_document.worker.json
-}
-
-resource "aws_eip" "unused" {
-  domain = "vpc"
 }

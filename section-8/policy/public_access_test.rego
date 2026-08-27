@@ -8,7 +8,12 @@ test_denies_public_access_controls if {
     "resource_changes": [{
       "address": "aws_s3_bucket_public_access_block.artifacts",
       "type": "aws_s3_bucket_public_access_block",
-      "change": {"after": {"block_public_acls": false}}
+      "change": {"after": {
+        "block_public_acls": false,
+        "block_public_policy": true,
+        "ignore_public_acls": true,
+        "restrict_public_buckets": true
+      }}
     }]
   }
   count(result) == 1
