@@ -27,10 +27,12 @@ async function filesBelow(directory, prefix = '') {
   }
   return files;
 }
-async function treeHash(directory) {
+async function scopedTreeHash(directory, scopes) {
   const hash = createHash('sha256');
-  for (const file of await filesBelow(directory)) {
-    hash.update(file.relative); hash.update('\0'); hash.update(await readFile(file.absolute)); hash.update('\0');
+  for (const scope of scopes) {
+    for (const file of await filesBelow(resolve(directory, scope), scope)) {
+      hash.update(file.relative); hash.update('\0'); hash.update(await readFile(file.absolute)); hash.update('\0');
+    }
   }
   return hash.digest('hex');
 }
@@ -80,7 +82,9 @@ async function processTreeRssKib(rootPid) {
 
 const started = new Date().toISOString();
 const startedMonotonic = performance.now();
-const source_sha256 = await treeHash(source);
+const evaluatedScopes = ['starter', 'policy', 'scanner', 'adversarial', 'fixtures'];
+const source_sha256 = await scopedTreeHash(source, evaluatedScopes);
+const evaluator_sha256 = sha256(await readFile(new URL(import.meta.url)));
 await mkdir(output);
 await writeFile(resolve(output, '.section-8-run.json'), JSON.stringify({kind: 'agentic-iac-section-8', started}, null, 2));
 for (const directory of ['starter', 'policy', 'scanner', 'adversarial', 'fixtures']) {
@@ -195,7 +199,7 @@ const effectiveLockText = await readFile(resolve(work, '.terraform.lock.hcl'), '
 const completed = new Date().toISOString();
 const report = {
   schema: 'agentic-iac-section-8-evidence/v1', started, completed, elapsed_ms: Math.round(performance.now() - startedMonotonic), engine, tool_versions,
-  source_sha256, plan_sha256: planText ? sha256(planText) : null, decision, gates,
+  source_sha256, evaluator_sha256, plan_sha256: planText ? sha256(planText) : null, decision, gates,
   lockfile: {source_sha256: sha256(sourceLockText), effective_sha256: sha256(effectiveLockText), rewritten: sourceLockText !== effectiveLockText},
   expected_managed_addresses,
   observations: {plan_resource_count: managed.length, managed_addresses: managedAddresses, plan_shape: planShape, trivy_findings: trivyFindings, wildcard_policy: wildcardFound, faulty_policy_conftest_exit: conftest.exit, policy_test_exit: policyTest.exit, suppressions: suppressionIds, ignored_rule_ids: ignoreIds, ignore_registry_consistent: ignoreConsistent, redactions: redacted.count, secret_values_stored, attack_classes_rejected: attackClasses},
