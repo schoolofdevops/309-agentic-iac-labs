@@ -202,7 +202,7 @@ const report = {
   source_sha256, evaluator_sha256, plan_sha256: planText ? sha256(planText) : null, decision, gates,
   lockfile: {source_sha256: sha256(sourceLockText), effective_sha256: sha256(effectiveLockText), rewritten: sourceLockText !== effectiveLockText},
   expected_managed_addresses,
-  observations: {plan_resource_count: managed.length, managed_addresses: managedAddresses, plan_shape: planShape, trivy_findings: trivyFindings, wildcard_policy: wildcardFound, faulty_policy_conftest_exit: conftest.exit, policy_test_exit: policyTest.exit, suppressions: suppressionIds, ignored_rule_ids: ignoreIds, ignore_registry_consistent: ignoreConsistent, redactions: redacted.count, secret_values_stored, attack_classes_rejected: attackClasses},
+  observations: {plan_resource_count: managed.length, managed_addresses: managedAddresses, plan_shape: planShape, trivy_findings: trivyFindings, wildcard_policy: wildcardFound, conftest_exit: conftest.exit, policy_test_exit: policyTest.exit, suppressions: suppressionIds, ignored_rule_ids: ignoreIds, ignore_registry_consistent: ignoreConsistent, redactions: redacted.count, secret_values_stored, attack_classes_rejected: attackClasses},
   commands: commandRecords,
   human_boundary: 'Pipeline acceptance is ready for human plan review, not permission for an environment operation.',
 };
