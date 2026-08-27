@@ -1,0 +1,28 @@
+{
+  "suppressions": [
+    {
+      "rule_id": "AWS-0089",
+      "scope": "course plan-only artifact bucket",
+      "owner": "course-platform-team",
+      "reason": "The lab has no real access-log destination and performs no remote operation.",
+      "expires": "2027-08-28",
+      "compensating_evidence": "No infrastructure operation is permitted by the Section 8 runner."
+    },
+    {
+      "rule_id": "AWS-0090",
+      "scope": "course plan-only artifact bucket",
+      "owner": "course-platform-team",
+      "reason": "Versioning lifecycle is proven in Section 7; this section isolates evidence-pipeline mechanics.",
+      "expires": "2027-08-28",
+      "compensating_evidence": "The plan is disposable and is never executed."
+    },
+    {
+      "rule_id": "AWS-0132",
+      "scope": "course plan-only artifact bucket",
+      "owner": "course-platform-team",
+      "reason": "A customer-managed KMS key would add unrelated identity and cost scope to this plan-only lab.",
+      "expires": "2027-08-28",
+      "compensating_evidence": "No data or remote bucket is created."
+    }
+  ]
+}

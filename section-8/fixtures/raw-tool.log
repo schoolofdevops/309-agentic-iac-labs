@@ -1,0 +1,3 @@
+tool=course-fixture
+AWS_SECRET_ACCESS_KEY=course-secret-must-not-enter-evidence
+result=validation complete
