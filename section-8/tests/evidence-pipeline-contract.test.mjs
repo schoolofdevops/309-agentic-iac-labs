@@ -58,6 +58,8 @@ test('one-command runner is fixed, plan-only, and produces bounded evidence', ()
   assert.doesNotMatch(runner, /\b(apply|destroy)\b/);
   assert.match(runner, /evidence-report\.json/);
   assert.match(runner, /source_sha256/);
+  assert.match(runner, /evaluator_sha256/);
+  assert.match(runner, /scopedTreeHash/);
   assert.match(runner, /plan_sha256/);
   assert.match(runner, /tool_versions/);
   assert.match(runner, /elapsed_ms/);
