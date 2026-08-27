@@ -6,6 +6,7 @@ output "resource_prefix" {
 output "local_endpoint" {
   description = "Local connection endpoint used by the course lifecycle."
   value       = local.floci_endpoint
+  sensitive   = true
 }
 
 output "queue_url" {
