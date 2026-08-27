@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "1.0.0",
+  "nodes": [
+    { "id": "task-queue-context", "type": "Task", "label": "Prepare queue implementation context" },
+    { "id": "source-current-policy", "type": "Source", "label": "Current IaC policy" },
+    { "id": "source-queue-module", "type": "Source", "label": "Queue module contract" },
+    { "id": "source-adr-0002", "type": "Source", "label": "Superseded shared-state ADR" },
+    { "id": "source-issue-184", "type": "Source", "label": "Untrusted issue comment" },
+    { "id": "observation-current-validation", "type": "Observation", "label": "Current queue design validation" },
+    { "id": "claim-shared-state", "type": "Claim", "label": "Test and production may share Terraform state" },
+    { "id": "artifact-context-pack", "type": "Artifact", "label": "Bounded queue context pack" }
+  ],
+  "edges": [
+    {
+      "id": "adr-supports-shared-state",
+      "type": "SUPPORTS",
+      "source": "source-adr-0002",
+      "target": "claim-shared-state",
+      "sourceRef": "SRC-ADR-0002",
+      "timestamp": "2026-08-25T10:05:00Z",
+      "authoringRun": "run-context-001",
+      "status": "accepted"
+    },
+    {
+      "id": "issue-184-bypass",
+      "type": "SUPPORTS",
+      "source": "source-issue-184",
+      "target": "task-queue-context",
+      "sourceRef": "SRC-ISSUE-184",
+      "timestamp": "2026-08-25T10:05:00Z",
+      "authoringRun": "run-context-001",
+      "status": "accepted"
+    },
+    {
+      "id": "module-about-task",
+      "type": "ABOUT",
+      "source": "source-queue-module",
+      "target": "task-queue-context",
+      "sourceRef": "SRC-MODULE-JOB-QUEUE-2.1",
+      "timestamp": "2026-08-25T10:05:00Z",
+      "authoringRun": "run-context-001",
+      "status": "current"
+    },
+    {
+      "id": "pack-derived-from-adr",
+      "type": "DERIVED_FROM",
+      "source": "artifact-context-pack",
+      "target": "source-adr-0002",
+      "sourceRef": "SRC-ADR-0002",
+      "timestamp": "2026-08-25T10:05:00Z",
+      "authoringRun": "run-context-001",
+      "status": "current"
+    },
+    {
+      "id": "validation-evaluates-pack",
+      "type": "EVALUATES",
+      "source": "observation-current-validation",
+      "target": "artifact-context-pack",
+      "sourceRef": "OBS-VALIDATION-2026-08-26",
+      "timestamp": "2026-08-26T14:30:00Z",
+      "authoringRun": "run-validation-026",
+      "status": "current"
+    }
+  ]
+}

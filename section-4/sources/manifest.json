@@ -1,0 +1,29 @@
+{
+  "algorithm": "sha256",
+  "files": [
+    {
+      "path": "policy/current-iac-policy.md",
+      "sha256": "66535c62a5c7f1bd3d9cf4d2ae23bbfa3cd7ba7784d72e889d4b84cce2c3cf51"
+    },
+    {
+      "path": "modules/job-queue-contract.md",
+      "sha256": "75121b6060e9189f260d5061a17961297800af60e8046a9c83221a07e0950e96"
+    },
+    {
+      "path": "decisions/adr-0002-shared-queue-state.md",
+      "sha256": "27b982f32f634a46feb3fc4e81bf63f68ea0c0e873046f6c0cae269acfb6fb40"
+    },
+    {
+      "path": "observations/validation-2026-08-26.md",
+      "sha256": "d287f5446c15b02ee87079a82434649cef98f444544bf469e514fa536bb69774"
+    },
+    {
+      "path": "incidents/incident-042-state-collision.md",
+      "sha256": "8d3d0d071cb1c765c4e44c05f6f1d59db5cc708d501864e6d586e8ba7a940201"
+    },
+    {
+      "path": "issues/issue-184.md",
+      "sha256": "87d6a9dfadd0984999a01f9f6e1b3a5c7f918926b0d37ee05947d643cc370e05"
+    }
+  ]
+}

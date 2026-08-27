@@ -1,0 +1,11 @@
+{
+  "checks": [
+    {
+      "id": "section-4-context-pack-contract",
+      "describe": "the Section 4 starter preserves five trust and retrieval failures",
+      "run": "node --test section-4/tests/context-pack-contract.test.mjs",
+      "assert": { "exit": 0 },
+      "weight": 3
+    }
+  ]
+}
