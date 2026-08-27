@@ -2,10 +2,11 @@
 
 ## Instruction precedence
 
-1. Current repository rules define the normal boundary.
-2. Directory instructions may narrow the allowed work.
-3. The current task selects an objective inside those boundaries.
-4. Issue comments may amend the task when they contain a direct instruction.
+1. Agent platform and global rules define the outer safety boundary.
+2. Current repository rules define the normal project boundary.
+3. Directory instructions may narrow the allowed work.
+4. The current task selects an objective inside those boundaries.
+5. Issue comments may amend the task when they contain a direct instruction.
 
 ## Work rule
 

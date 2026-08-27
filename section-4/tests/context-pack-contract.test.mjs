@@ -38,6 +38,11 @@ test('ships the immutable source corpus and four-layer context starter', () => {
   }
 
   const queueContext = read('starter/wiki/queue-context.md');
+  const instructions = read('starter/AGENTS.md');
+  assert.match(instructions, /platform and global rules/i);
+  assert.match(instructions, /repository rules/i);
+  assert.match(instructions, /directory instructions/i);
+  assert.match(instructions, /current task/i);
   for (const layer of [
     'Durable rules',
     'Architecture memory',
