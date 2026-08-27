@@ -6,7 +6,7 @@ The project grows from a governed Terraform repair into a Production AI Workload
 
 ## Current status
 
-Sections 2 through 6 are available as learner labs. Each lab is published only
+Sections 2 through 7 are available as learner labs. Each lab is published only
 after its local checks and resource profile have direct validation evidence.
 
 ## Available learner labs
@@ -16,6 +16,7 @@ after its local checks and resource profile have direct validation evidence.
 - [Section 4: Give Your IaC Agent the Right Context](section-4/README.md)
 - [Section 5: Connect Your IaC Agent to Tools, Skills, and MCP](section-5/README.md)
 - [Section 6: Build, Test, and Optimize Reliable IaC Agent Workflows](section-6/README.md)
+- [Section 7: Build Infrastructure with Terraform, OpenTofu, and AI Agents](section-7/README.md)
 
 ## Planned learner checkpoints
 
