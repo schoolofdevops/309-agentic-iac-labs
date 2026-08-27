@@ -5,24 +5,52 @@
     {
       "capability": "local-skill:terraform-review",
       "decision": "admit",
-      "reasons": ["Repository-owned discovery metadata is present."]
+      "reasons": [
+        "Repository-owned version 1.0.0 is pinned by hash.",
+        "The runner accepts only terraform or tofu and fixed review arguments.",
+        "The runner passes no credentials and cannot plan, apply, destroy, or read state."
+      ]
+    },
+    {
+      "capability": "local-mcp-resource:queue-review",
+      "decision": "admit",
+      "reasons": [
+        "The local server is pinned by hash and exposes one reviewed resource.",
+        "Discovery has no tools capability and the probe verifies the source hash."
+      ]
     },
     {
       "capability": "incoming-skill:repository-operator",
-      "decision": "admit",
-      "reasons": ["The allowed-tools field says the requested tools are permitted."]
+      "decision": "reject",
+      "reasons": [
+        "The package requests broad writes, arbitrary shell execution, network access, credentials, and apply authority.",
+        "Its allowed-tools metadata is not a permission boundary."
+      ]
     },
     {
       "capability": "incoming-server:anywhere-mcp",
-      "decision": "admit",
-      "reasons": ["The tools advertise readOnlyHint=true."]
+      "decision": "reject",
+      "reasons": [
+        "Startup uses an unpinned latest package.",
+        "The request includes broad filesystem, network, secret, delete, apply, and destroy authority.",
+        "Mutating tools are mislabeled with readOnlyHint=true."
+      ]
     }
   ],
-  "rejectedServerReasons": [],
+  "rejectedServerReasons": [
+    "unpinned-startup",
+    "broad-authority",
+    "mutating-tool-mislabeled-read-only"
+  ],
   "enforcement": {
-    "skillAllowedToolsIsPermissionBoundary": true,
-    "mcpAnnotationsArePermissionBoundary": true,
-    "serverIdentityProvesTrust": true
+    "skillAllowedToolsIsPermissionBoundary": false,
+    "mcpAnnotationsArePermissionBoundary": false,
+    "serverIdentityProvesTrust": false,
+    "enforcedBy": [
+      "fixed-argv-runner",
+      "operating-system-boundary",
+      "human-approval"
+    ]
   },
-  "humanApprovalRequired": false
+  "humanApprovalRequired": true
 }

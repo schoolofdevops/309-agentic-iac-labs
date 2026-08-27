@@ -1,0 +1,65 @@
+{
+  "schema": "course.agentic-iac.capability-trust/v1",
+  "reviewId": "queue-review-local-capabilities-v1",
+  "defaultDecision": "deny",
+  "networkAllowed": false,
+  "secretPatternsAllowed": [],
+  "forbiddenOperations": [
+    "plan",
+    "apply",
+    "destroy",
+    "state"
+  ],
+  "artifacts": [
+    {
+      "path": "skills/terraform-review/SKILL.md",
+      "sha256": "ec9bf7cd238ba5537d2e3952162fba96a0d507d966aed2a617b425e8c8135b71"
+    },
+    {
+      "path": "skills/terraform-review/references/command-contract.md",
+      "sha256": "6114095d9f5b81d38d8f13ae21e991eff71e693bc990d02edafebda06ce3ccd1"
+    },
+    {
+      "path": "skills/terraform-review/scripts/review-iac.mjs",
+      "sha256": "5b425de762fe6274c191dae94e87af51c77602f4850a6ed4d6a64bf45a69e8c3"
+    },
+    {
+      "path": "runner/command-contract.json",
+      "sha256": "ea58d47419151a8df6b073b0313c36efc005a4ccbe444364ca66520e94de1e52"
+    },
+    {
+      "path": "mcp/server.mjs",
+      "sha256": "1400a0c18962550bb33546eb735eff51546b03146ec5df5dada022e25b0b2e65"
+    }
+  ],
+  "skill": {
+    "capability": "local-skill:terraform-review",
+    "owner": "course-maintainers",
+    "version": "1.0.0",
+    "allowedExecutables": [
+      "terraform",
+      "tofu"
+    ],
+    "workingDirectory": "isolated temporary copy of section-5/fixture",
+    "shell": false,
+    "timeoutMs": 30000
+  },
+  "mcp": {
+    "capability": "resources-only",
+    "owner": "course-maintainers",
+    "version": "1.0.0",
+    "protocolVersion": "2026-07-28",
+    "resourceUri": "iac://course/queue-review",
+    "source": {
+      "path": "section-5/fixture/queue-context.md",
+      "sha256": "b018afe8e5e872e9584430693727effb5503fdbd7ee12a93a286851da86b7af0"
+    },
+    "toolsAllowed": false,
+    "promptsAllowed": false
+  },
+  "revocation": {
+    "owner": "course-maintainers",
+    "trigger": "hash drift, ownership change, expanded authority, failed test, or reported vulnerability",
+    "action": "remove admission and rotate the pinned artifact hashes"
+  }
+}
