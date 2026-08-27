@@ -67,6 +67,25 @@ test('uses a small typed evidence graph with reviewable provenance', () => {
     assert.match(edge.timestamp, /^2026-/);
     assert.match(edge.authoringRun, /^run-/);
   }
+
+  const validationEdge = graph.edges.find(
+    (edge) => edge.id === 'validation-supports-design-claim',
+  );
+  assert.deepEqual(
+    {
+      type: validationEdge?.type,
+      source: validationEdge?.source,
+      target: validationEdge?.target,
+      sourceRef: validationEdge?.sourceRef,
+    },
+    {
+      type: 'SUPPORTS',
+      source: 'observation-current-validation',
+      target: 'claim-current-design-validated',
+      sourceRef: 'OBS-VALIDATION-2026-08-26',
+    },
+    'the Section 3 observation supports a design-validation claim; it does not evaluate the Section 4 context pack',
+  );
 });
 
 test('preserves the exact five unsafe context decisions in the starter', () => {

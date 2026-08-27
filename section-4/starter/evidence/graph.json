@@ -8,6 +8,7 @@
     { "id": "source-issue-184", "type": "Source", "label": "Untrusted issue comment" },
     { "id": "observation-current-validation", "type": "Observation", "label": "Current queue design validation" },
     { "id": "claim-shared-state", "type": "Claim", "label": "Test and production may share Terraform state" },
+    { "id": "claim-current-design-validated", "type": "Claim", "label": "The current queue design passed its two bounded validation checks" },
     { "id": "artifact-context-pack", "type": "Artifact", "label": "Bounded queue context pack" }
   ],
   "edges": [
@@ -52,10 +53,10 @@
       "status": "current"
     },
     {
-      "id": "validation-evaluates-pack",
-      "type": "EVALUATES",
+      "id": "validation-supports-design-claim",
+      "type": "SUPPORTS",
       "source": "observation-current-validation",
-      "target": "artifact-context-pack",
+      "target": "claim-current-design-validated",
       "sourceRef": "OBS-VALIDATION-2026-08-26",
       "timestamp": "2026-08-26T14:30:00Z",
       "authoringRun": "run-validation-026",
