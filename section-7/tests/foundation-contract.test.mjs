@@ -97,6 +97,9 @@ test('provides a fixed local lifecycle and guarded cleanup', () => {
   assert.match(lifecycle, /-backend=false/);
   assert.match(lifecycle, /refactor plan did not report the declared move/);
   assert.match(lifecycle, /0 to add, 1 to change, 0 to destroy/);
+  assert.match(lifecycle, /expected eight create actions/);
+  assert.match(lifecycle, /dependency graph is missing/);
+  assert.match(lifecycle, /direct APIs still list named resources after destroy/);
   assert.match(lifecycle, /human_approval_required: true/);
   assert.ok(!lifecycle.includes("['state', 'mv'"));
   assert.ok(!lifecycle.includes("['import'"));

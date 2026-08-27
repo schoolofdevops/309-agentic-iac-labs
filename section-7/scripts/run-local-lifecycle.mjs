@@ -75,8 +75,18 @@ run('validate', engine, ['validate', '-no-color']);
 const lock = fs.readFileSync(path.join(workspace, '.terraform.lock.hcl'), 'utf8');
 const lockSource = lock.includes('registry.opentofu.org/hashicorp/aws') ? 'registry.opentofu.org/hashicorp/aws' : 'registry.terraform.io/hashicorp/aws';
 const lockSha256 = crypto.createHash('sha256').update(lock).digest('hex');
+const providerVersion = lock.match(/provider\s+"[^"]+hashicorp\/aws"[\s\S]*?version\s+=\s+"([^"]+)"/)?.[1];
+if (providerVersion !== '6.61.0') reject(`expected AWS provider 6.61.0, observed ${providerVersion || 'unknown'}`);
 
 run('create-plan', engine, ['plan', '-input=false', '-no-color', '-out=create.tfplan', ...common]);
+const createPlanJson = JSON.parse(run('create-plan-json', engine, ['show', '-json', 'create.tfplan']));
+const createActions = createPlanJson.resource_changes?.filter((change) => change.change?.actions?.includes('create')) || [];
+if (createActions.length !== 8) reject(`expected eight create actions, observed ${createActions.length}`);
+const graph = run('create-graph', engine, ['graph', '-type=plan', '-plan=create.tfplan']);
+for (const required of ['module.identity', 'module.storage', 'module.queue']) {
+  if (!graph.includes(required)) reject(`dependency graph is missing ${required}`);
+}
+const graphSha256 = crypto.createHash('sha256').update(graph).digest('hex');
 run('create-apply', engine, ['apply', '-input=false', '-no-color', '-auto-approve', 'create.tfplan']);
 const initialState = run('initial-state', engine, ['state', 'list', '-no-color']).trim().split('\n').filter(Boolean);
 
@@ -96,28 +106,33 @@ const noChange = run('convergence-plan', engine, ['plan', '-input=false', '-no-c
 if (!noChange.includes('No changes.')) reject('second plan did not converge');
 
 const aws = (label, serviceArgs) => run(label, 'aws', [...serviceArgs, '--endpoint-url', endpoint, '--no-cli-pager']);
-const api = {
-  buckets: JSON.parse(aws('read-s3', ['s3api', 'list-buckets', '--output', 'json'])).Buckets.map((item) => item.Name).filter((name) => name.startsWith(prefix)),
-  queues: JSON.parse(aws('read-sqs', ['sqs', 'list-queues', '--queue-name-prefix', prefix, '--output', 'json'])).QueueUrls || [],
-  tables: JSON.parse(aws('read-dynamodb', ['dynamodb', 'list-tables', '--output', 'json'])).TableNames.filter((name) => name.startsWith(prefix)),
-  roles: JSON.parse(aws('read-iam', ['iam', 'list-roles', '--output', 'json'])).Roles.map((item) => item.RoleName).filter((name) => name.startsWith(prefix)),
-  logs: JSON.parse(aws('read-logs', ['logs', 'describe-log-groups', '--log-group-name-prefix', `/course/${prefix}`, '--output', 'json'])).logGroups.map((item) => item.logGroupName),
-};
+const collectApi = (label) => ({
+  buckets: JSON.parse(aws(`${label}-s3`, ['s3api', 'list-buckets', '--output', 'json'])).Buckets.map((item) => item.Name).filter((name) => name.startsWith(prefix)),
+  queues: JSON.parse(aws(`${label}-sqs`, ['sqs', 'list-queues', '--queue-name-prefix', prefix, '--output', 'json'])).QueueUrls || [],
+  tables: JSON.parse(aws(`${label}-dynamodb`, ['dynamodb', 'list-tables', '--output', 'json'])).TableNames.filter((name) => name.startsWith(prefix)),
+  roles: JSON.parse(aws(`${label}-iam`, ['iam', 'list-roles', '--output', 'json'])).Roles.map((item) => item.RoleName).filter((name) => name.startsWith(prefix)),
+  logs: JSON.parse(aws(`${label}-logs`, ['logs', 'describe-log-groups', '--log-group-name-prefix', `/course/${prefix}`, '--output', 'json'])).logGroups.map((item) => item.logGroupName),
+});
+const api = collectApi('read');
 
 run('destroy', engine, ['destroy', '-input=false', '-no-color', '-auto-approve', ...updated], {timeout: 300000});
 const emptyState = run('empty-state', engine, ['state', 'list', '-no-color']).trim();
 if (emptyState) reject('state is not empty after destroy');
 const destroyCheck = run('destroy-check', engine, ['plan', '-destroy', '-input=false', '-no-color', ...updated]);
 if (!destroyCheck.includes('No changes.')) reject('destroy convergence did not report no changes');
+const cleanupApi = collectApi('cleanup');
+if (Object.values(cleanupApi).some((items) => items.length)) reject('direct APIs still list named resources after destroy');
 
 const evidence = {
   schema_version: 1,
   engine,
   endpoint,
   prefix,
-  provider_version: '6.61.0',
+  provider_version: providerVersion,
   lock_source: lockSource,
   lock_sha256: lockSha256,
+  create_action_count: createActions.length,
+  graph_sha256: graphSha256,
   initial_resource_count: initialState.length,
   moved_from: 'module.queue.aws_sqs_queue.jobs',
   moved_to: 'module.messaging.aws_sqs_queue.jobs',
@@ -125,6 +140,7 @@ const evidence = {
   update_summary: '0 add, 1 change, 0 destroy',
   convergence: 'no changes',
   api_observations: api,
+  cleanup_api_observations: cleanupApi,
   final_state_count: 0,
   destroy_convergence: 'no changes',
   human_approval_required: true,
