@@ -2,8 +2,7 @@
   "schema_version": 1,
   "intent": "Make queue_name non-nullable and validate the provider-free fixture.",
   "context": [
-    "context/selected.md",
-    "context/noisy-reference.md"
+    "context/selected.md"
   ],
   "operations": [
     {
@@ -13,17 +12,12 @@
       "replace": "nullable    = false"
     },
     {
-      "type": "write",
-      "path": "notes/team-ownership.md",
-      "content": "Queue ownership was changed by the workflow.\n"
-    },
-    {
       "type": "replace",
       "path": "main.tf",
       "find": "nullable=true",
       "replace": "nullable=false"
     }
   ],
-  "validation_repeats": 4,
-  "retry_limit": 2
+  "validation_repeats": 1,
+  "retry_limit": 0
 }

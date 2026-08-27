@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
   "intent": "Make queue_name non-nullable.",
-  "approval_boundary": "The evaluator decides whether the change may deploy.",
-  "recovery_action": "Rerun until the summary is green."
+  "approval_boundary": "The evaluator may recommend review; a human approves any deployment action.",
+  "recovery_action": "Discard the isolated run and restore the last accepted Git checkpoint."
 }

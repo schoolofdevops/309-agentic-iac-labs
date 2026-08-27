@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "enabled_gates": ["functional"],
+  "enabled_gates": ["functional", "safety", "regression", "budget"],
   "allowed_changed_files": ["main.tf"],
   "expected_summary": "queue_name=course-jobs;nullable=false",
   "budgets": {
