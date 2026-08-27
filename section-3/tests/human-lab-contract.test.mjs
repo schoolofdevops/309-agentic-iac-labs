@@ -40,7 +40,8 @@ test('keeps the portable task bounded to four design artifacts', () => {
   assert.match(task, /job payload/i);
   assert.match(task, /trust boundar/i);
   assert.match(task, /client-to-API/i);
-  assert.match(task, /encrypted queue interfaces/i);
+  assert.match(task, /AMQP queue interfaces/i);
+  assert.match(task, /separate TLS security/i);
   assert.match(task, /not\s+proof of runtime enforcement/i);
   assert.match(task, /security approval/i);
   assert.match(task, /Do not[\s\S]*implementation code/i);

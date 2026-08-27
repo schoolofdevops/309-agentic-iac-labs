@@ -193,8 +193,8 @@ sed -n '1,300p' section-3/starter/architecture/queue-feature.calm.json
 
 Trace the current relationships. The model has an API, queue, worker, result
 store, and secret manager, but it does not yet show every path required by the
-task. It already defines an HTTPS jobs interface, encrypted queue interfaces,
-and security and operability controls. Preserve them.
+task. It already defines an HTTPS jobs interface, AMQP queue interfaces, and
+separate security and operability controls. Preserve them.
 
 Read the `controls-evidence-boundary` text before editing. A control in an
 architecture document is a requirement for later implementation and testing.
@@ -343,8 +343,8 @@ Add the missing actor and relationships so a reviewer can trace:
 6. API and worker runtime access to secret management.
 
 Give the external client its own trust boundary. Keep node IDs and relationship
-references consistent. Preserve the HTTPS API interface, AMQPS queue interfaces,
-and both control requirements. This file is an architecture model, not
+references consistent. Preserve the HTTPS API interface, AMQP queue interfaces,
+and the separate TLS and operability control requirements. This file is an architecture model, not
 deployment configuration or runtime evidence.
 
 ## PART V - Validate and Review the Candidate
