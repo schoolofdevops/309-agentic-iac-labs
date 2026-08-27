@@ -19,7 +19,7 @@ test('starter is rejected even though format, validation, plan, and faulty polic
     assert.equal(report.gates.format.status, 'PASS');
     assert.equal(report.gates.validation.status, 'PASS');
     assert.equal(report.gates.plan.status, 'PASS');
-    assert.equal(report.observations.faulty_policy_conftest_exit, 0);
+    assert.equal(report.observations.conftest_exit, 0);
     for (const gate of ['contract', 'lint', 'security', 'policy', 'cost']) assert.equal(report.gates[gate].status, 'FAIL');
     for (const gate of ['redaction', 'agent_safety']) assert.equal(report.gates[gate].status, 'PASS');
     assert.equal(report.observations.plan_resource_count, 6);
