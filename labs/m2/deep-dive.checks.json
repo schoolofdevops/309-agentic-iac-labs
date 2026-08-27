@@ -24,7 +24,7 @@
     {
       "id": "section-2-candidate-diff-is-parseable",
       "describe": "the working repair diff, when present, contains no whitespace error",
-      "run": "git diff --check -- section-2/starter/main.tf",
+      "run": "git diff --check HEAD -- section-2/starter/main.tf",
       "assert": {"exit": 0},
       "weight": 2
     }
