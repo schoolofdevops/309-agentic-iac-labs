@@ -6,13 +6,14 @@ The project grows from a governed Terraform repair into a Production AI Workload
 
 ## Current status
 
-Sections 2 and 3 are available as learner labs. Each lab is published only
+Sections 2, 3, and 4 are available as learner labs. Each lab is published only
 after its local checks and resource profile have direct validation evidence.
 
 ## Available learner labs
 
 - [Section 2: Governed Terraform Repair](section-2/README.md)
 - [Section 3: Plan Your IaC Change Before the Agent Writes Code](section-3/README.md)
+- [Section 4: Give Your IaC Agent the Right Context](section-4/README.md)
 
 ## Planned learner checkpoints
 
