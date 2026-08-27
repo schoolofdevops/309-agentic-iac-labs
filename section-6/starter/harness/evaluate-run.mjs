@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import {readFileSync} from 'node:fs';
+import {readFileSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
-import {readJson, resolveInside, sectionRoot} from './lib/core.mjs';
+import {fileSha256, readJson, resolveInside, sectionRoot} from './lib/core.mjs';
 
 function parseArguments(argv) {
   const result = {};
@@ -115,6 +115,44 @@ try {
 
   const passed = findings.length === 0;
   const passedGates = gateResults.filter((gate) => gate.passed).length;
+  const runCard = {
+    schema_version: 1,
+    intent: run.intent,
+    engine: run.engine,
+    decision: passed ? 'ready_for_human_review' : 'rejected',
+    human_approval_required: true,
+    approval_boundary: run.run_card.approval_boundary,
+    recovery_action: run.run_card.recovery_action,
+    hashes: {
+      ...run.hashes,
+      suite_sha256: fileSha256(suitePath),
+    },
+    changed_files: run.changes.files,
+    gates: gateResults,
+    findings,
+    failure_classes: [...new Set(findings.map((finding) => finding.id.split('.')[0]))],
+    telemetry: {
+      command_count: run.execution.command_count,
+      retry_count: run.execution.observed_retry_count,
+      configured_retry_limit: run.execution.configured_retry_limit,
+      command_duration_ms: Number(
+        run.execution.commands.reduce((sum, command) => sum + command.duration_ms, 0).toFixed(2),
+      ),
+      context_bytes: run.context.bytes,
+      context_estimated_tokens: run.context.estimated_tokens,
+      output_bytes: run.output.bytes,
+      output_estimated_tokens: run.output.estimated_tokens,
+      estimate_method: run.context.estimate_method,
+      estimated_cost_usd: run.cost.estimated_usd,
+      cost_label: run.cost.label,
+      provider_bill: run.cost.provider_bill,
+    },
+    thresholds: suite.budgets,
+  };
+  writeFileSync(
+    path.join(path.resolve(options.run), 'run-card.json'),
+    `${JSON.stringify(runCard, null, 2)}\n`,
+  );
   console.log(`Run evaluation: ${passed ? 'PASS' : 'REJECTED'} (${passedGates}/${gateResults.length} enabled gates passed)`);
   for (const finding of findings) console.log(`- ${finding.id}: ${finding.message}`);
   process.exitCode = passed ? 0 : 1;

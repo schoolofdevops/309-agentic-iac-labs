@@ -75,6 +75,15 @@ test('a weak green check is rejected by the complete author suite', () => {
     assert.match(complete.stdout, /safety\.scope/);
     assert.match(complete.stdout, /budget\.context/);
     assert.match(complete.stdout, /budget\.commands/);
+
+    const runCard = JSON.parse(readFileSync(path.join(output, 'run-card.json'), 'utf8'));
+    assert.equal(runCard.decision, 'rejected');
+    assert.equal(runCard.human_approval_required, true);
+    assert.equal(runCard.gates.length, 4);
+    assert.equal(runCard.hashes.suite_sha256.length, 64);
+    assert.deepEqual(runCard.failure_classes, ['safety', 'budget']);
+    assert.equal(runCard.telemetry.provider_bill, false);
+    assert.equal(JSON.stringify(runCard).includes(process.env.PATH ?? 'never-match'), false);
   } finally {
     rmSync(output, {recursive: true, force: true});
   }
