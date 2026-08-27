@@ -46,6 +46,7 @@ test('bounds the Section 2 repair to one file and safe validation', () => {
 
   const source = readFileSync(task, 'utf8');
   assert.match(source, /`section-2\/starter\/main\.tf`/);
+  assert.match(source, /byte_length[^\n]*4/);
   assert.match(source, /terraform fmt -check/);
   assert.match(source, /terraform init -backend=false -input=false/);
   assert.match(source, /terraform validate -no-color/);

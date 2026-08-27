@@ -5,7 +5,9 @@
 The starter keeps its generated platform identifier, but the Terraform resource
 that creates it is missing. Restore that declaration so local Terraform and
 OpenTofu validation succeed. Keep `output.platform_name` backed by
-`random_id.platform.hex`.
+`random_id.platform.hex`. Declare `random_id.platform` with `byte_length = 4`;
+this four-byte size is part of the required result, not a value for the agent to
+guess.
 
 ## Work boundary
 
