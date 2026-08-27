@@ -1,0 +1,11 @@
+{
+  "checks": [
+    {
+      "id": "section-3-design-pack-contract",
+      "describe": "the Section 3 starter preserves the two design failures and complete scaffold",
+      "run": "node --test section-3/tests/design-pack-contract.test.mjs",
+      "assert": { "exit": 0 },
+      "weight": 3
+    }
+  ]
+}

@@ -1,0 +1,117 @@
+{
+  "$schema": "https://calm.finos.org/release/1.2/meta/calm.json",
+  "$id": "https://schoolofdevops.example/agentic-iac/queue-feature.calm.json",
+  "title": "Production AI Workload Platform - asynchronous queue path",
+  "description": "Design-time view of the API, queue, worker, result store, and secret manager.",
+  "metadata": {
+    "owner": "platform-engineering",
+    "version": "0.1.0",
+    "status": "design-review",
+    "trust-boundaries": [
+      "public-api",
+      "workload-platform",
+      "secret-management"
+    ]
+  },
+  "nodes": [
+    {
+      "unique-id": "workload-api",
+      "node-type": "service",
+      "name": "Workload API",
+      "description": "Accepts jobs and exposes job status and results.",
+      "metadata": {
+        "lifecycle-owner": "application",
+        "trust-boundary": "public-api"
+      }
+    },
+    {
+      "unique-id": "job-queue",
+      "node-type": "message-queue",
+      "name": "Job Queue",
+      "description": "Buffers accepted jobs until a worker can process them.",
+      "metadata": {
+        "lifecycle-owner": "terraform",
+        "trust-boundary": "workload-platform"
+      }
+    },
+    {
+      "unique-id": "workload-worker",
+      "node-type": "service",
+      "name": "Workload Worker",
+      "description": "Consumes queued jobs and records their outcome.",
+      "metadata": {
+        "lifecycle-owner": "application",
+        "trust-boundary": "workload-platform"
+      }
+    },
+    {
+      "unique-id": "result-store",
+      "node-type": "database",
+      "name": "Result Store",
+      "description": "Stores runtime job status and result data outside Terraform state.",
+      "metadata": {
+        "lifecycle-owner": "application",
+        "trust-boundary": "workload-platform"
+      }
+    },
+    {
+      "unique-id": "secret-manager",
+      "node-type": "system",
+      "name": "Secret Manager",
+      "description": "Supplies queue credentials to workloads at runtime.",
+      "metadata": {
+        "lifecycle-owner": "secret-management",
+        "trust-boundary": "secret-management"
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "unique-id": "api-publishes-job",
+      "relationship-type": {
+        "connects": {
+          "source": { "node": "workload-api" },
+          "destination": { "node": "job-queue" }
+        }
+      },
+      "protocol": "AMQP",
+      "description": "The API publishes accepted job messages to the queue."
+    },
+    {
+      "unique-id": "worker-consumes-job",
+      "relationship-type": {
+        "connects": {
+          "source": { "node": "job-queue" },
+          "destination": { "node": "workload-worker" }
+        }
+      },
+      "protocol": "AMQP",
+      "description": "The worker consumes queued job messages."
+    },
+    {
+      "unique-id": "worker-writes-result",
+      "relationship-type": {
+        "connects": {
+          "source": { "node": "workload-worker" },
+          "destination": { "node": "result-store" }
+        }
+      },
+      "protocol": "TCP",
+      "description": "The worker records job status and result data."
+    },
+    {
+      "unique-id": "worker-reads-secret",
+      "relationship-type": {
+        "connects": {
+          "source": { "node": "workload-worker" },
+          "destination": { "node": "secret-manager" }
+        }
+      },
+      "protocol": "HTTPS",
+      "description": "The worker reads queue credentials at runtime."
+    }
+  ],
+  "adrs": [
+    "../decisions/0001-queue-ownership.md"
+  ]
+}
