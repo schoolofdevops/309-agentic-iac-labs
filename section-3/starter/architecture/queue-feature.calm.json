@@ -46,14 +46,14 @@
       "interfaces": [
         {
           "unique-id": "queue-publish",
-          "protocol": "AMQPS",
+          "protocol": "AMQP",
           "host": "queue.workload.example",
           "port": 5671,
           "queue": "workload-jobs"
         },
         {
           "unique-id": "queue-consume",
-          "protocol": "AMQPS",
+          "protocol": "AMQP",
           "host": "queue.workload.example",
           "port": 5671,
           "queue": "workload-jobs"

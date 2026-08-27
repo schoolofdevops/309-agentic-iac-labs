@@ -67,19 +67,25 @@ test('models useful API and queue interfaces in the data-flow relationships', ()
     queueInterfaces.some(
       (entry) =>
         entry['unique-id'] === 'queue-publish' &&
-        entry.protocol === 'AMQPS' &&
+        entry.protocol === 'AMQP' &&
         entry.port === 5671,
     ),
-    'the queue needs a secure publisher interface',
+    'the queue needs an AMQP publisher interface; TLS is a separate control',
   );
   assert.ok(
     queueInterfaces.some(
       (entry) =>
         entry['unique-id'] === 'queue-consume' &&
-        entry.protocol === 'AMQPS' &&
+        entry.protocol === 'AMQP' &&
         entry.port === 5671,
     ),
-    'the queue needs a secure consumer interface',
+    'the queue needs an AMQP consumer interface; TLS is a separate control',
+  );
+
+  assert.doesNotMatch(
+    JSON.stringify(architecture),
+    /AMQPS/,
+    'AMQP is the protocol; TLS belongs in the separate security control',
   );
 
   assert.deepEqual(

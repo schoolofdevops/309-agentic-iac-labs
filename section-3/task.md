@@ -35,8 +35,8 @@ Your candidate design must meet all of these acceptance criteria:
 7. The CALM model shows the client-to-API interaction, API-to-queue path,
    queue-to-worker path, worker-to-result path, API-to-result path, and runtime
    secret lookups across named trust boundaries. Preserve the HTTPS API
-   interface, encrypted queue interfaces, and the security and operability
-   controls.
+   interface, the AMQP queue interfaces, and the separate TLS security and
+   operability controls.
 8. Architecture controls remain design requirements. Their presence is not
    proof of runtime enforcement or operational evidence.
 9. Platform engineering, application engineering, and security approval remain
