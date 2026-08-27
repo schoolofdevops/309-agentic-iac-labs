@@ -1,0 +1,32 @@
+{
+  "checks": [
+    {
+      "id": "section-2-committed-starter-is-formatted",
+      "describe": "the deliberately broken committed starter still passes the narrow formatting gate",
+      "run": "git show HEAD:section-2/starter/main.tf | terraform fmt -check -",
+      "assert": {"exit": 0},
+      "weight": 2
+    },
+    {
+      "id": "section-2-committed-starter-retains-semantic-defect",
+      "describe": "the committed starter identity still contains the undeclared reference and no matching resource",
+      "run": "node --input-type=module -e \"import{execFileSync}from'node:child_process';import assert from'node:assert/strict';const s=execFileSync('git',['show','HEAD:section-2/starter/main.tf'],{encoding:'utf8'});assert.match(s,/random_id\\.platform\\.hex/);assert.doesNotMatch(s,/resource\\s+\\\"random_id\\\"\\s+\\\"platform\\\"/)\"",
+      "assert": {"exit": 0},
+      "weight": 3
+    },
+    {
+      "id": "section-2-task-has-stable-git-identity",
+      "describe": "Git can bind the task contract to an exact committed object",
+      "run": "git rev-parse HEAD:section-2/task.md",
+      "assert": {"matches": "^[0-9a-f]{40}$"},
+      "weight": 2
+    },
+    {
+      "id": "section-2-candidate-diff-is-parseable",
+      "describe": "the working repair diff, when present, contains no whitespace error",
+      "run": "git diff --check -- section-2/starter/main.tf",
+      "assert": {"exit": 0},
+      "weight": 2
+    }
+  ]
+}
