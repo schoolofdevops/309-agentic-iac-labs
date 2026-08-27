@@ -21,6 +21,9 @@ test('publishes a human-first Section 3 entry point without exposing the answer 
   assert.match(readme, /@finos\/calm-cli@1\.57\.0 validate/);
   assert.match(readme, /Codex/);
   assert.match(readme, /compatible coding agent|edit manually/i);
+  assert.match(readme, /"interacts"/);
+  assert.match(readme, /"actor": "api-client"/);
+  assert.match(readme, /"nodes": \["workload-api"\]/);
   assert.doesNotMatch(readme, /answer-key\.md/);
 });
 
