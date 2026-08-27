@@ -45,9 +45,13 @@ const redact = (value) => {
 
 async function processTreeRssKib(rootPid) {
   const child = spawn('ps', ['-axo', 'pid=,ppid=,rss='], {shell: false, stdio: ['ignore', 'pipe', 'ignore']});
-  let output = '';
+  let output = ''; let unavailable = false;
   child.stdout.on('data', (chunk) => { output += chunk; });
-  await new Promise((done) => child.once('close', done));
+  await new Promise((done) => {
+    child.once('error', () => { unavailable = true; done(); });
+    child.once('close', done);
+  });
+  if (unavailable) return 0;
   const rows = output.trim().split('\n').map((line) => line.trim().split(/\s+/).map(Number)).filter((row) => row.length === 3);
   const children = new Map();
   const rss = new Map();
