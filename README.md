@@ -15,6 +15,7 @@ after its local checks and resource profile have direct validation evidence.
 - [Section 3: Plan Your IaC Change Before the Agent Writes Code](section-3/README.md)
 - [Section 4: Give Your IaC Agent the Right Context](section-4/README.md)
 - [Section 5: Connect Your IaC Agent to Tools, Skills, and MCP](section-5/README.md)
+- [Section 6: Build, Test, and Optimize Reliable IaC Agent Workflows](section-6/README.md)
 
 ## Planned learner checkpoints
 

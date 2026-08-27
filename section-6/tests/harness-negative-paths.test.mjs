@@ -106,3 +106,17 @@ test('OpenTofu produces the same weak-green and complete-rejection boundary', ()
     rmSync(output, {recursive: true, force: true});
   }
 });
+
+test('cleanup removes only a marked Section 6 temporary run', () => {
+  const output = path.join(tmpdir(), `agentic-iac-section-6-test-${process.pid}-${Date.now()}`);
+  const workflow = runNode([
+    'starter/harness/run-workflow.mjs', '--engine', 'terraform', '--output', output,
+  ]);
+  assert.equal(workflow.status, 0, workflow.stderr || workflow.stdout);
+  const cleanup = runNode(['scripts/cleanup-run.mjs', output]);
+  assert.equal(cleanup.status, 0, cleanup.stderr || cleanup.stdout);
+  assert.match(cleanup.stdout, /Removed Section 6 run/);
+  const second = runNode(['scripts/cleanup-run.mjs', output]);
+  assert.equal(second.status, 0, second.stderr || second.stdout);
+  assert.match(second.stdout, /Already absent/);
+});
