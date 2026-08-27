@@ -83,6 +83,7 @@ const initialState = run('initial-state', engine, ['state', 'list', '-no-color']
 fs.writeFileSync(path.join(workspace, 'main.tf'), finalMain);
 fs.writeFileSync(path.join(workspace, 'moved.tf'), finalMoved);
 fs.writeFileSync(path.join(workspace, 'outputs.tf'), finalOutputs);
+run('refactor-init', engine, ['init', '-backend=false', '-input=false', '-no-color']);
 const refactorPlan = run('refactor-plan', engine, ['plan', '-input=false', '-no-color', '-out=refactor.tfplan', ...common]);
 if (!refactorPlan.includes('has moved to')) reject('refactor plan did not report the declared move');
 run('refactor-apply', engine, ['apply', '-input=false', '-no-color', '-auto-approve', 'refactor.tfplan']);
