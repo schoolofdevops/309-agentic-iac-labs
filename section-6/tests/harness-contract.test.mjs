@@ -79,3 +79,12 @@ test('a weak green check is rejected by the complete author suite', () => {
     rmSync(output, {recursive: true, force: true});
   }
 });
+
+test('publishes one author check that exposes the weak starter findings', () => {
+  const result = runNode(['scripts/check-harness.mjs', 'terraform']);
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stdout, /Workflow run: FUNCTIONAL PASS/);
+  assert.match(result.stdout, /Run evaluation: REJECTED/);
+  assert.match(result.stdout, /safety\.scope/);
+  assert.match(result.stdout, /budget\.context/);
+});
