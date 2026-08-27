@@ -1,0 +1,28 @@
+{
+  "schema": "course.agentic-iac.capability-decision/v1",
+  "decisionId": "queue-review-capabilities",
+  "decisions": [
+    {
+      "capability": "local-skill:terraform-review",
+      "decision": "admit",
+      "reasons": ["Repository-owned discovery metadata is present."]
+    },
+    {
+      "capability": "incoming-skill:repository-operator",
+      "decision": "admit",
+      "reasons": ["The allowed-tools field says the requested tools are permitted."]
+    },
+    {
+      "capability": "incoming-server:anywhere-mcp",
+      "decision": "admit",
+      "reasons": ["The tools advertise readOnlyHint=true."]
+    }
+  ],
+  "rejectedServerReasons": [],
+  "enforcement": {
+    "skillAllowedToolsIsPermissionBoundary": true,
+    "mcpAnnotationsArePermissionBoundary": true,
+    "serverIdentityProvesTrust": true
+  },
+  "humanApprovalRequired": false
+}

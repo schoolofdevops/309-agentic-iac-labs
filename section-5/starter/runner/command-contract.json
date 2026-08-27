@@ -1,0 +1,18 @@
+{
+  "schema": "course.agentic-iac.cli-review/v1",
+  "workingDirectory": "section-5/fixture",
+  "shell": false,
+  "timeoutMs": 30000,
+  "environment": {
+    "CHECKPOINT_DISABLE": "1",
+    "TF_IN_AUTOMATION": "1"
+  },
+  "allowedExecutables": ["terraform", "tofu"],
+  "commands": [
+    ["fmt", "-check", "-diff", "main.tf"],
+    ["init", "-backend=false", "-input=false", "-no-color"],
+    ["validate", "-no-color"]
+  ],
+  "forbiddenOperations": ["plan", "apply", "destroy", "state"],
+  "evidence": ["executable", "argv", "workingDirectory", "durationMs", "exitCode", "stdout", "stderr", "inputSha256"]
+}

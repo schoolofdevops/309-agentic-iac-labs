@@ -1,0 +1,18 @@
+{
+  "schema": "course.agentic-iac.immutable-inputs/v1",
+  "mutable": false,
+  "files": [
+    {
+      "path": "skills/repository-operator/SKILL.md",
+      "sha256": "33d1239da5dab63fe8d6fad376aca52c5fc855a1cdb11a979577cf2eff94a165"
+    },
+    {
+      "path": "skills/repository-operator/scripts/run.sh",
+      "sha256": "4fa42aebc038b3b6823638cfd3e3888e45552d3eadbc1333e5d070b952682167"
+    },
+    {
+      "path": "server-admission-request.json",
+      "sha256": "5272898c1ff1efb651e655849a965a49790179b284d0fd015a3c528cc29cf1ef"
+    }
+  ]
+}

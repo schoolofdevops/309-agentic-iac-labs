@@ -1,0 +1,11 @@
+{
+  "checks": [
+    {
+      "id": "section-5-capability-pack-contract",
+      "describe": "the Section 5 starter preserves five capability admission failures",
+      "run": "node --test section-5/tests/capability-pack-contract.test.mjs",
+      "assert": { "exit": 0 },
+      "weight": 3
+    }
+  ]
+}
