@@ -1,9 +1,20 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  copyFileSync,
+  lstatSync,
+  mkdtempSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +24,7 @@ const starterRoot = resolve(dirname(scriptPath), '../../..');
 const sectionRoot = resolve(starterRoot, '..');
 const contractPath = resolve(starterRoot, 'runner/command-contract.json');
 const sourcePath = resolve(sectionRoot, 'fixture/main.tf');
+const evidenceRoot = resolve(starterRoot, 'evidence');
 const expectedCommands = [
   ['fmt', '-check', '-diff', 'main.tf'],
   ['init', '-backend=false', '-input=false', '-no-color'],
@@ -32,18 +44,25 @@ function redact(value) {
 
 function parseArguments(argv) {
   let engine;
-  let evidence;
+  let evidenceName;
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index];
     const value = argv[index + 1];
     if (!value) throw new Error(`missing value for ${name ?? 'argument'}`);
     if (name === '--engine') engine = value;
-    else if (name === '--evidence') evidence = value;
+    else if (name === '--evidence') evidenceName = value;
     else throw new Error(`unknown argument: ${name}`);
   }
   if (!['terraform', 'tofu'].includes(engine)) throw new Error('engine must be terraform or tofu');
-  if (!evidence) throw new Error('evidence path is required');
-  return { engine, evidence: isAbsolute(evidence) ? evidence : resolve(process.cwd(), evidence) };
+  if (
+    !evidenceName ||
+    evidenceName.length > 128 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/.test(evidenceName) ||
+    evidenceName.includes('..')
+  ) {
+    throw new Error('evidence must be a JSON file name such as terraform-review.json; paths are not allowed');
+  }
+  return { engine, evidenceName };
 }
 
 function readContract() {
@@ -125,6 +144,13 @@ function main() {
       if (result.exitCode !== 0 || result.timedOut) break;
     }
     const passed = commands.length === contract.commands.length && commands.every((entry) => entry.exitCode === 0 && !entry.timedOut);
+    mkdirSync(evidenceRoot, { recursive: true, mode: 0o700 });
+    const evidenceDirectory = lstatSync(evidenceRoot);
+    if (!evidenceDirectory.isDirectory() || evidenceDirectory.isSymbolicLink()) {
+      throw new Error('the reviewed evidence directory is not a real directory');
+    }
+    const evidencePath = resolve(evidenceRoot, options.evidenceName);
+    const evidenceFile = `section-5/starter/evidence/${options.evidenceName}`;
     const evidence = {
       schema: 'course.agentic-iac.review-evidence/v1',
       runnerVersion: RUNNER_VERSION,
@@ -133,6 +159,7 @@ function main() {
       engineVersion,
       sourceWorkingDirectory: contract.workingDirectory,
       executionWorkingDirectory: 'isolated-temporary-copy',
+      evidenceFile,
       shell: false,
       timeoutMs: contract.timeoutMs,
       environmentKeys: Object.keys(environment).sort(),
@@ -141,10 +168,18 @@ function main() {
       commands,
       passed,
     };
-    mkdirSync(dirname(options.evidence), { recursive: true });
-    writeFileSync(options.evidence, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+    const descriptor = openSync(
+      evidencePath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      writeFileSync(descriptor, `${JSON.stringify(evidence, null, 2)}\n`);
+    } finally {
+      closeSync(descriptor);
+    }
     process.stdout.write(`IaC review: ${passed ? 'PASS' : 'FAIL'} (${options.engine})\n`);
-    process.stdout.write(`Evidence: ${options.evidence}\n`);
+    process.stdout.write(`Evidence: ${evidenceFile}\n`);
     if (!passed) process.exitCode = 1;
   } catch (error) {
     process.stderr.write(`${redact(error.message)}\n`);

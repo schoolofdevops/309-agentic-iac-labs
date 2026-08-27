@@ -15,7 +15,7 @@
       "capability": "local-mcp-resource:queue-review",
       "decision": "admit",
       "reasons": [
-        "The local server is pinned by hash and exposes one reviewed resource.",
+        "The local server is pinned by hash, starts with one exact argv array, and exposes one reviewed resource.",
         "Discovery has no tools capability and the probe verifies the source hash."
       ]
     },

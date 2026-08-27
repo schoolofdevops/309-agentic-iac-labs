@@ -17,10 +17,10 @@ capability.
 
 - One engine: `terraform` or `tofu`.
 - The fixed source file at `section-5/fixture/main.tf`.
-- An evidence file path chosen by the reviewer.
+- One evidence file name, such as `terraform-review.json`.
 
-Do not accept a command, shell fragment, working directory, or extra Terraform
-argument from a prompt.
+Do not accept an evidence path, command, shell fragment, working directory, or
+extra Terraform argument from a prompt.
 
 ## Procedure
 
@@ -31,7 +31,7 @@ argument from a prompt.
    ```bash
    node section-5/starter/skills/terraform-review/scripts/review-iac.mjs \
      --engine terraform \
-     --evidence /tmp/terraform-review.json
+     --evidence terraform-review.json
    ```
 
 4. Read the terminal result and the evidence JSON.
@@ -40,7 +40,10 @@ argument from a prompt.
 
 The wrapper copies `main.tf` to a temporary directory. It uses fixed argument
 arrays with `shell: false`, removes the temporary directory, and does not change
-the source fixture.
+the source fixture. It writes a new file only inside
+`section-5/starter/evidence/`. It rejects absolute paths, directory separators,
+hidden names, and `..`, and it will not replace an existing file or follow a
+symbolic link.
 
 ## Outputs
 
@@ -55,6 +58,7 @@ Stop without running a command when:
 
 - the engine is not `terraform` or `tofu`;
 - any caller asks for different arguments or a different working directory;
+- the evidence value is a path instead of a simple JSON file name;
 - the contract contains `plan`, `apply`, `destroy`, or `state`;
 - the fixture or contract cannot be read;
 - a command times out or returns a non-zero exit code;

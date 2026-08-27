@@ -15,6 +15,11 @@ Each command has a 30-second timeout and uses `shell: false`. The runner copies
 the provider-free input to an isolated temporary directory, runs the checks
 there, and removes the temporary directory.
 
+The only persistent write is a new JSON file below
+`section-5/starter/evidence/`. The CLI accepts a file name, not a path. It
+rejects absolute paths, `/`, `\\`, hidden names, and `..`. The runner refuses
+to replace an existing file and refuses a symbolic-link evidence directory.
+
 The runner passes only a small environment: `PATH`, `TMPDIR`,
 `CHECKPOINT_DISABLE=1`, `TF_IN_AUTOMATION=1`, and an isolated `TF_DATA_DIR`.
 It does not pass cloud credentials, `TF_VAR_*` values, or arbitrary environment

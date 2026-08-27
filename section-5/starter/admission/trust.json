@@ -13,15 +13,15 @@
   "artifacts": [
     {
       "path": "skills/terraform-review/SKILL.md",
-      "sha256": "ec9bf7cd238ba5537d2e3952162fba96a0d507d966aed2a617b425e8c8135b71"
+      "sha256": "4dcbf61ccd4390d81824d2033d619fb38b02e7f14a7d4df5d1585c03f10f1e00"
     },
     {
       "path": "skills/terraform-review/references/command-contract.md",
-      "sha256": "6114095d9f5b81d38d8f13ae21e991eff71e693bc990d02edafebda06ce3ccd1"
+      "sha256": "bf72f2abb7756812116abb1135c2cf96613d6faa51e0471c728b12c13aaee2af"
     },
     {
       "path": "skills/terraform-review/scripts/review-iac.mjs",
-      "sha256": "5b425de762fe6274c191dae94e87af51c77602f4850a6ed4d6a64bf45a69e8c3"
+      "sha256": "54dae6f65c6cfd55dddfe31ec3522221a778151c9fe3f37f96269fa9a83fc7fc"
     },
     {
       "path": "runner/command-contract.json",
@@ -41,6 +41,7 @@
       "tofu"
     ],
     "workingDirectory": "isolated temporary copy of section-5/fixture",
+    "persistentWriteBoundary": "section-5/starter/evidence/<new-json-file>",
     "shell": false,
     "timeoutMs": 30000
   },
@@ -49,6 +50,11 @@
     "owner": "course-maintainers",
     "version": "1.0.0",
     "protocolVersion": "2026-07-28",
+    "startupArgv": [
+      "node",
+      "section-5/starter/mcp/server.mjs"
+    ],
+    "controlArtifactBoundary": "course control; not MCP protocol metadata",
     "resourceUri": "iac://course/queue-review",
     "source": {
       "path": "section-5/fixture/queue-context.md",

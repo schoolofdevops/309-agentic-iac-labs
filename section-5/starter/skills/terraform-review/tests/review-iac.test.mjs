@@ -11,6 +11,7 @@ const skillRoot = fileURLToPath(new URL('../', import.meta.url));
 const starterRoot = fileURLToPath(new URL('../../../', import.meta.url));
 const sectionRoot = fileURLToPath(new URL('../../../../', import.meta.url));
 const runner = `${skillRoot}/scripts/review-iac.mjs`;
+const evidenceRoot = `${starterRoot}/evidence`;
 const trustPath = `${starterRoot}/admission/trust.json`;
 const decisionPath = `${starterRoot}/admission/decision.json`;
 
@@ -53,10 +54,37 @@ test('runner rejects engines and arguments outside the fixed contract', () => {
   assert.match(extraArgument.stderr, /unknown argument: --command/);
 });
 
+test('runner rejects evidence paths and accepts only a JSON file name', () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'm5-evidence-scope-'));
+  const invalidNames = [
+    `${tempRoot}/absolute.json`,
+    '../escape.json',
+    'nested/review.json',
+    'nested\\review.json',
+    '.',
+    '..',
+    '.hidden.json',
+    'review..json',
+  ];
+  try {
+    for (const name of invalidNames) {
+      const result = spawnSync(process.execPath, [runner, '--engine', 'terraform', '--evidence', name], {
+        cwd: tempRoot,
+        encoding: 'utf8',
+      });
+      assert.equal(result.status, 2, `runner accepted unsafe evidence name: ${name}`);
+      assert.match(result.stderr, /evidence must be a JSON file name/);
+    }
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('runner redacts secret-shaped tool output and does not pass caller secrets', () => {
   const tempRoot = mkdtempSync(join(tmpdir(), 'm5-redaction-'));
   const binRoot = `${tempRoot}/bin`;
-  const evidencePath = `${tempRoot}/evidence.json`;
+  const evidenceName = `redaction-${process.pid}.json`;
+  const evidencePath = `${evidenceRoot}/${evidenceName}`;
   mkdirSync(binRoot);
   writeFileSync(
     `${binRoot}/terraform`,
@@ -75,7 +103,7 @@ fi
   chmodSync(`${binRoot}/terraform`, 0o755);
 
   try {
-    const result = spawnSync(process.execPath, [runner, '--engine', 'terraform', '--evidence', evidencePath], {
+    const result = spawnSync(process.execPath, [runner, '--engine', 'terraform', '--evidence', evidenceName], {
       cwd: sectionRoot,
       encoding: 'utf8',
       env: {
@@ -89,6 +117,7 @@ fi
     assert.doesNotMatch(evidenceText, /visible-password|visible-token|caller-secret|CALLER_SECRET_WAS_PASSED/);
     assert.match(evidenceText, /\[REDACTED\]/);
   } finally {
+    rmSync(evidencePath, { force: true });
     rmSync(tempRoot, { recursive: true, force: true });
   }
 });
@@ -96,10 +125,11 @@ fi
 for (const engine of ['terraform', 'tofu']) {
   test(`runner validates the fixture with ${engine} and writes review evidence`, () => {
     const tempRoot = mkdtempSync(join(tmpdir(), `m5-runner-${engine}-`));
-    const evidencePath = `${tempRoot}/evidence.json`;
+    const evidenceName = `${engine}-${process.pid}.json`;
+    const evidencePath = `${evidenceRoot}/${evidenceName}`;
     const fixtureHashBefore = sha256File(`${sectionRoot}/fixture/main.tf`);
     try {
-      const result = spawnSync(process.execPath, [runner, '--engine', engine, '--evidence', evidencePath], {
+      const result = spawnSync(process.execPath, [runner, '--engine', engine, '--evidence', evidenceName], {
         cwd: sectionRoot,
         encoding: 'utf8',
         env: {
@@ -122,6 +152,7 @@ for (const engine of ['terraform', 'tofu']) {
       assert.equal(evidence.engine, engine);
       assert.match(evidence.engineVersion, new RegExp(engine === 'terraform' ? '^Terraform v' : '^OpenTofu v'));
       assert.equal(evidence.sourceWorkingDirectory, 'section-5/fixture');
+      assert.equal(evidence.evidenceFile, `section-5/starter/evidence/${evidenceName}`);
       assert.equal(evidence.shell, false);
       assert.equal(evidence.timeoutMs, 30000);
       assert.equal(evidence.passed, true);
@@ -145,6 +176,7 @@ for (const engine of ['terraform', 'tofu']) {
       }
       assert.equal(sha256File(`${sectionRoot}/fixture/main.tf`), fixtureHashBefore, 'runner changed the source fixture');
     } finally {
+      rmSync(evidencePath, { force: true });
       rmSync(tempRoot, { recursive: true, force: true });
     }
   });
@@ -178,6 +210,8 @@ test('trust evidence pins admitted local artifacts and denies broad authority', 
   assert.equal(trust.mcp.owner, 'course-maintainers');
   assert.equal(trust.mcp.version, '1.0.0');
   assert.equal(trust.mcp.protocolVersion, '2026-07-28');
+  assert.deepEqual(trust.mcp.startupArgv, ['node', 'section-5/starter/mcp/server.mjs']);
+  assert.equal(trust.mcp.controlArtifactBoundary, 'course control; not MCP protocol metadata');
   assert.deepEqual(trust.mcp.source, {
     path: 'section-5/fixture/queue-context.md',
     sha256: sha256File(`${sectionRoot}/fixture/queue-context.md`),
