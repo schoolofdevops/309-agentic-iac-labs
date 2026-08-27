@@ -44,7 +44,12 @@ const redact = (value) => {
 };
 
 async function processTreeRssKib(rootPid) {
-  const child = spawn('ps', ['-axo', 'pid=,ppid=,rss='], {shell: false, stdio: ['ignore', 'pipe', 'ignore']});
+  let child;
+  try {
+    child = spawn('ps', ['-axo', 'pid=,ppid=,rss='], {shell: false, stdio: ['ignore', 'pipe', 'ignore']});
+  } catch {
+    return 0;
+  }
   let output = ''; let unavailable = false;
   child.stdout.on('data', (chunk) => { output += chunk; });
   await new Promise((done) => {
