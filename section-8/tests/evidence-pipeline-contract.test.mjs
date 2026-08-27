@@ -64,6 +64,7 @@ test('one-command runner is fixed, plan-only, and produces bounded evidence', ()
   assert.match(runner, /peak_rss_mib/);
   assert.match(runner, /expected_managed_addresses/);
   assert.match(runner, /lockfile/);
+  assert.match(runner, /ignoreConsistent/);
 });
 
 test('cleanup rejects broad, unmarked, and symbolic-link targets', () => {

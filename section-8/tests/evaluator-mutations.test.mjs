@@ -24,6 +24,7 @@ test('mutated evaluator inputs fail plan shape, suppression, redaction, and agen
     const suppressions = JSON.parse(await readFile(suppressionsPath, 'utf8'));
     delete suppressions.suppressions[0].expires;
     await writeFile(suppressionsPath, `${JSON.stringify(suppressions, null, 2)}\n`);
+    await writeFile(join(source, 'scanner/trivy.ignore'), 'AWS-0089\nAWS-0090\nAWS-0132\nAWS-9999\n');
 
     await writeFile(join(source, 'fixtures/raw-tool.log'), 'tool=course-fixture\nPRIVATE_KEY=course-secret-must-not-enter-evidence\n');
 
