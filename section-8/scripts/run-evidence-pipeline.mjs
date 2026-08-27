@@ -165,7 +165,9 @@ try { trivyFindings = (JSON.parse(security.stdout).Results || []).reduce((sum, r
 
 const suppressions = JSON.parse(await readFile(resolve(output, 'scanner/suppressions.json'), 'utf8')).suppressions;
 const suppressionIds = suppressions.map((item) => item.rule_id).sort();
-const suppressionValid = JSON.stringify(suppressionIds) === JSON.stringify(['AWS-0089', 'AWS-0090', 'AWS-0132']) && suppressions.every((item) => item.scope && item.owner && item.reason && item.expires && item.compensating_evidence);
+const ignoreIds = (await readFile(resolve(output, 'scanner/trivy.ignore'), 'utf8')).split('\n').map((line) => line.trim()).filter((line) => line && !line.startsWith('#')).sort();
+const ignoreConsistent = JSON.stringify(ignoreIds) === JSON.stringify(suppressionIds);
+const suppressionValid = JSON.stringify(suppressionIds) === JSON.stringify(['AWS-0089', 'AWS-0090', 'AWS-0132']) && suppressions.every((item) => item.scope && item.owner && item.reason && /^\d{4}-\d{2}-\d{2}$/.test(item.expires) && Date.parse(item.expires) > Date.now() && item.compensating_evidence);
 const rawLog = await readFile(resolve(output, 'fixtures/raw-tool.log'), 'utf8');
 const redacted = redact(rawLog);
 await writeFile(resolve(output, 'redacted-tool.log'), redacted.text);
@@ -181,7 +183,7 @@ const gates = {
   contract: status(contract.exit === 0, `exit ${contract.exit}`),
   plan: status(planned.exit === 0 && show.exit === 0 && planShape !== 'unexpected', `plan ${planned.exit}; show ${show.exit}; shape ${planShape}`),
   lint: status(lint.exit === 0, `exit ${lint.exit}`),
-  security: status(security.exit === 0 && !wildcardFound && suppressionValid, `trivy findings ${trivyFindings}; wildcard ${wildcardFound}; suppressions ${suppressionValid}`),
+  security: status(security.exit === 0 && !wildcardFound && suppressionValid && ignoreConsistent, `trivy findings ${trivyFindings}; wildcard ${wildcardFound}; suppressions ${suppressionValid}; ignore registry ${ignoreConsistent}`),
   policy: status(policyTest.exit === 0 && conftest.exit === 0, `policy tests ${policyTest.exit}; conftest ${conftest.exit}`),
   cost: status(costFailures.length === 0, costFailures.join('; ') || 'static limits pass'),
   redaction: status(redacted.count > 0 && secret_values_stored === 0, `${redacted.count} value redacted`),
@@ -196,7 +198,7 @@ const report = {
   source_sha256, plan_sha256: planText ? sha256(planText) : null, decision, gates,
   lockfile: {source_sha256: sha256(sourceLockText), effective_sha256: sha256(effectiveLockText), rewritten: sourceLockText !== effectiveLockText},
   expected_managed_addresses,
-  observations: {plan_resource_count: managed.length, managed_addresses: managedAddresses, plan_shape: planShape, trivy_findings: trivyFindings, wildcard_policy: wildcardFound, faulty_policy_conftest_exit: conftest.exit, policy_test_exit: policyTest.exit, suppressions: suppressionIds, redactions: redacted.count, secret_values_stored, attack_classes_rejected: attackClasses},
+  observations: {plan_resource_count: managed.length, managed_addresses: managedAddresses, plan_shape: planShape, trivy_findings: trivyFindings, wildcard_policy: wildcardFound, faulty_policy_conftest_exit: conftest.exit, policy_test_exit: policyTest.exit, suppressions: suppressionIds, ignored_rule_ids: ignoreIds, ignore_registry_consistent: ignoreConsistent, redactions: redacted.count, secret_values_stored, attack_classes_rejected: attackClasses},
   commands: commandRecords,
   human_boundary: 'Pipeline acceptance is ready for human plan review, not permission for an environment operation.',
 };
