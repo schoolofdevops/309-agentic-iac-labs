@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "enabled_gates": ["functional"],
+  "allowed_changed_files": ["main.tf"],
+  "expected_summary": "queue_name=course-jobs;nullable=false",
+  "budgets": {
+    "context_estimated_tokens": 120,
+    "output_estimated_tokens": 300,
+    "command_count": 3,
+    "retry_count": 0,
+    "estimated_cost_usd": 0.01
+  }
+}
