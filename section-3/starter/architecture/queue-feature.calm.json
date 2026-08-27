@@ -7,6 +7,7 @@
     "owner": "platform-engineering",
     "version": "0.1.0",
     "status": "design-review",
+    "controls-evidence-boundary": "These controls are design requirements for review. Their presence is not proof of runtime enforcement.",
     "trust-boundaries": [
       "public-api",
       "workload-platform",
@@ -22,7 +23,16 @@
       "metadata": {
         "lifecycle-owner": "application",
         "trust-boundary": "public-api"
-      }
+      },
+      "interfaces": [
+        {
+          "unique-id": "jobs-api",
+          "protocol": "HTTPS",
+          "host": "api.workload.example",
+          "port": 443,
+          "path": "/v1/jobs"
+        }
+      ]
     },
     {
       "unique-id": "job-queue",
@@ -32,7 +42,23 @@
       "metadata": {
         "lifecycle-owner": "terraform",
         "trust-boundary": "workload-platform"
-      }
+      },
+      "interfaces": [
+        {
+          "unique-id": "queue-publish",
+          "protocol": "AMQPS",
+          "host": "queue.workload.example",
+          "port": 5671,
+          "queue": "workload-jobs"
+        },
+        {
+          "unique-id": "queue-consume",
+          "protocol": "AMQPS",
+          "host": "queue.workload.example",
+          "port": 5671,
+          "queue": "workload-jobs"
+        }
+      ]
     },
     {
       "unique-id": "workload-worker",
@@ -71,22 +97,28 @@
       "relationship-type": {
         "connects": {
           "source": { "node": "workload-api" },
-          "destination": { "node": "job-queue" }
+          "destination": {
+            "node": "job-queue",
+            "interfaces": ["queue-publish"]
+          }
         }
       },
       "protocol": "AMQP",
-      "description": "The API publishes accepted job messages to the queue."
+      "description": "The API publishes accepted job messages through the queue's encrypted publisher interface."
     },
     {
       "unique-id": "worker-consumes-job",
       "relationship-type": {
         "connects": {
-          "source": { "node": "job-queue" },
+          "source": {
+            "node": "job-queue",
+            "interfaces": ["queue-consume"]
+          },
           "destination": { "node": "workload-worker" }
         }
       },
       "protocol": "AMQP",
-      "description": "The worker consumes queued job messages."
+      "description": "The worker consumes job messages through the queue's encrypted consumer interface."
     },
     {
       "unique-id": "worker-writes-result",
@@ -111,6 +143,47 @@
       "description": "The worker reads queue credentials at runtime."
     }
   ],
+  "controls": {
+    "secure-queue-data-flow": {
+      "description": "Design requirement: protect API and queue traffic in transit and authenticate every producer and consumer.",
+      "requirements": [
+        {
+          "requirement-url": "https://calm.finos.org/getting-started/controls/permitted-connection.requirement.json",
+          "config": {
+            "control-id": "security-002",
+            "name": "Permitted Connection",
+            "description": "Permits a connection on a relationship specified in the architecture",
+            "reason": "The queue connection is approved only when AMQP is protected by TLS and each workload has its own identity.",
+            "protocol": "AMQP"
+          }
+        }
+      ]
+    },
+    "operable-job-queue": {
+      "description": "Design requirement: make queue delay, failures, and recovery visible to operators.",
+      "requirements": [
+        {
+          "requirement-url": "https://calm.finos.org/draft/2025-03/samples/traderx/control-requirement/monitoring_and_observability/monitoring-control-requirement.json",
+          "config": {
+            "control-id": "operations-queue-001",
+            "name": "Job Queue Monitoring",
+            "description": "Collect queue health and failure signals so operators can detect delay and recover failed work.",
+            "monitoring-systems": ["OpenTelemetry"],
+            "metrics-collected": ["Error Rates", "Custom Business Metrics"],
+            "log-monitoring-enabled": true,
+            "reporting-frequency": {
+              "unit": "minutes",
+              "value": 5
+            },
+            "historical-data-retention": {
+              "unit": "months",
+              "value": 3
+            }
+          }
+        }
+      ]
+    }
+  },
   "adrs": [
     "../decisions/0001-queue-ownership.md"
   ]

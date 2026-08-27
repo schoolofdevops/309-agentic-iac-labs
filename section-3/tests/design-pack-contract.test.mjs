@@ -38,6 +38,93 @@ test('ships a structurally complete Section 3 design-pack starter', () => {
   );
 });
 
+test('models useful API and queue interfaces in the data-flow relationships', () => {
+  const architecture = JSON.parse(
+    readFileSync(`${starterRoot}/architecture/queue-feature.calm.json`, 'utf8'),
+  );
+  const nodes = new Map(architecture.nodes.map((node) => [node['unique-id'], node]));
+  const relationships = new Map(
+    architecture.relationships.map((relationship) => [
+      relationship['unique-id'],
+      relationship,
+    ]),
+  );
+
+  const apiInterfaces = nodes.get('workload-api')?.interfaces ?? [];
+  const queueInterfaces = nodes.get('job-queue')?.interfaces ?? [];
+
+  assert.ok(
+    apiInterfaces.some(
+      (entry) =>
+        entry['unique-id'] === 'jobs-api' &&
+        entry.protocol === 'HTTPS' &&
+        entry.port === 443 &&
+        entry.path === '/v1/jobs',
+    ),
+    'the workload API needs a useful HTTPS jobs interface',
+  );
+  assert.ok(
+    queueInterfaces.some(
+      (entry) =>
+        entry['unique-id'] === 'queue-publish' &&
+        entry.protocol === 'AMQPS' &&
+        entry.port === 5671,
+    ),
+    'the queue needs a secure publisher interface',
+  );
+  assert.ok(
+    queueInterfaces.some(
+      (entry) =>
+        entry['unique-id'] === 'queue-consume' &&
+        entry.protocol === 'AMQPS' &&
+        entry.port === 5671,
+    ),
+    'the queue needs a secure consumer interface',
+  );
+
+  assert.deepEqual(
+    relationships.get('api-publishes-job')?.['relationship-type']?.connects
+      ?.destination?.interfaces,
+    ['queue-publish'],
+  );
+  assert.deepEqual(
+    relationships.get('worker-consumes-job')?.['relationship-type']?.connects
+      ?.source?.interfaces,
+    ['queue-consume'],
+  );
+});
+
+test('records security and operational controls as design requirements, not runtime proof', () => {
+  const architecture = JSON.parse(
+    readFileSync(`${starterRoot}/architecture/queue-feature.calm.json`, 'utf8'),
+  );
+
+  assert.match(
+    architecture.metadata?.['controls-evidence-boundary'] ?? '',
+    /design requirements.+not proof.+runtime enforcement/i,
+  );
+
+  for (const controlId of ['secure-queue-data-flow', 'operable-job-queue']) {
+    const control = architecture.controls?.[controlId];
+    assert.ok(control, `missing architecture control: ${controlId}`);
+    assert.match(control.description, /design requirement/i);
+    assert.ok(Array.isArray(control.requirements) && control.requirements.length > 0);
+
+    for (const requirement of control.requirements) {
+      assert.match(
+        requirement['requirement-url'],
+        /^https:\/\/calm\.finos\.org\/(?:getting-started\/controls|draft\/2025-03\/samples\/traderx\/control-requirement)\//,
+      );
+      assert.equal(
+        Number(Object.hasOwn(requirement, 'config')) +
+          Number(Object.hasOwn(requirement, 'config-url')),
+        1,
+        'each control requirement needs exactly one config or config-url',
+      );
+    }
+  }
+});
+
 test('models the five lifecycle owners with human-readable vocabulary', () => {
   const stateMap = readFileSync(`${starterRoot}/environment-state-map.md`, 'utf8');
 
