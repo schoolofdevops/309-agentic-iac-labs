@@ -1,0 +1,49 @@
+name: Section 10 guarded Terraform plan
+
+on:
+  pull_request:
+    paths:
+      - "section-10/terraform/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: section-10-terraform-plan
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  terraform-plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Pin source: https://github.com/actions/checkout/releases/tag/v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # Pin source: https://github.com/hashicorp/setup-terraform/releases/tag/v4.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: 1.14.8
+          terraform_wrapper: false
+
+      - name: Evaluate reviewed plan
+        run: >-
+          node section-10/scripts/run-reviewed-plan.mjs
+          --engine terraform
+          --source .
+          --manifest "$RUNNER_TEMP/reviewed-change.json"
+          --output "$RUNNER_TEMP/agentic-iac-s10-plan-evidence"
+
+      # Pin source: https://github.com/actions/upload-artifact/releases/tag/v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: section-10-terraform-plan
+          path: ${{ runner.temp }}/agentic-iac-s10-plan-evidence
+          if-no-files-found: error
+          retention-days: 7
+
