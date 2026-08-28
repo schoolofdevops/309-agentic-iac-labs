@@ -1,0 +1,141 @@
+diff --git a/section-9/chart/templates/deployment.yaml b/section-9/chart/templates/deployment.yaml
+index 21e6d8b..2ea12fb 100644
+--- a/section-9/chart/templates/deployment.yaml
++++ b/section-9/chart/templates/deployment.yaml
+@@ -1,16 +1,4 @@
+ {{- $root := . -}}
+----
+-apiVersion: v1
+-kind: Secret
+-metadata:
+-  name: inference-platform-backend-token
+-  labels:
+-    app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+-    app.kubernetes.io/component: configuration
+-    app.kubernetes.io/managed-by: {{ .Release.Service }}
+-type: Opaque
+-data:
+-  token: {{ .Values.backend.token | b64enc | quote }}
+ {{- range $role := list "dependencies" "api" "worker" }}
+ {{- $context := dict "root" $root "role" $role }}
+ ---
+@@ -116,9 +104,9 @@ spec:
+             defaultMode: 0440
+             sources:
+               - secret:
+-                  name: inference-platform-backend-token
++                  name: {{ $root.Values.backend.existingSecret.name }}
+                   optional: false
+                   items:
+-                    - key: token
++                    - key: {{ $root.Values.backend.existingSecret.key }}
+                       path: token
+ {{- end }}
+diff --git a/section-9/chart/values.schema.json b/section-9/chart/values.schema.json
+index 0093be6..e194a1b 100644
+--- a/section-9/chart/values.schema.json
++++ b/section-9/chart/values.schema.json
+@@ -58,13 +58,21 @@
+     "backend": {
+       "type": "object",
+       "additionalProperties": false,
+-      "required": ["url", "token"],
++      "required": ["url", "existingSecret"],
+       "properties": {
+         "url": {
+           "type": "string",
+           "pattern": "^http://[^[:space:]]+$"
+         },
+-        "token": {"type": "string", "minLength": 16}
++        "existingSecret": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": ["name", "key"],
++          "properties": {
++            "name": {"type": "string", "minLength": 1},
++            "key": {"type": "string", "minLength": 1}
++          }
++        }
+       }
+     },
+     "resources": {
+@@ -74,22 +82,7 @@
+       "properties": {
+         "dependencies": {"$ref": "#/definitions/resources"},
+         "api": {"$ref": "#/definitions/resources"},
+-        "worker": {
+-          "type": "object",
+-          "additionalProperties": false,
+-          "required": ["requests"],
+-          "properties": {
+-            "requests": {
+-              "type": "object",
+-              "additionalProperties": false,
+-              "required": ["cpu", "memory"],
+-              "properties": {
+-                "cpu": {"$ref": "#/definitions/quantity"},
+-                "memory": {"$ref": "#/definitions/quantity"}
+-              }
+-            }
+-          }
+-        }
++        "worker": {"$ref": "#/definitions/resources"}
+       }
+     },
+     "probes": {
+@@ -115,7 +108,6 @@
+     }
+   },
+   "definitions": {
+-    "quantity": {"type": "string", "minLength": 1},
+     "resources": {
+       "type": "object",
+       "additionalProperties": false,
+@@ -126,8 +118,8 @@
+           "additionalProperties": false,
+           "required": ["cpu", "memory"],
+           "properties": {
+-            "cpu": {"$ref": "#/definitions/quantity"},
+-            "memory": {"$ref": "#/definitions/quantity"}
++            "cpu": {"type": "string", "const": "10m"},
++            "memory": {"type": "string", "const": "32Mi"}
+           }
+         },
+         "limits": {
+@@ -135,8 +127,8 @@
+           "additionalProperties": false,
+           "required": ["cpu", "memory"],
+           "properties": {
+-            "cpu": {"$ref": "#/definitions/quantity"},
+-            "memory": {"$ref": "#/definitions/quantity"}
++            "cpu": {"type": "string", "const": "100m"},
++            "memory": {"type": "string", "const": "64Mi"}
+           }
+         }
+       }
+diff --git a/section-9/chart/values.yaml b/section-9/chart/values.yaml
+index 5bd88eb..39bcb0f 100644
+--- a/section-9/chart/values.yaml
++++ b/section-9/chart/values.yaml
+@@ -16,8 +16,9 @@ service:
+ 
+ backend:
+   url: http://inference-platform-dependencies:8081
+-  # Seeded learner defect: generated token material must not live in values.
+-  token: s9-course-token-committed
++  existingSecret:
++    name: inference-platform-backend-token
++    key: token
+ 
+ resources:
+   dependencies:
+@@ -38,6 +39,9 @@ resources:
+     requests:
+       cpu: 10m
+       memory: 32Mi
++    limits:
++      cpu: 100m
++      memory: 64Mi
+ 
+ probes:
+   readiness:
