@@ -209,6 +209,12 @@ async function main() {
   const schemaUnknownKey = run('schema-unknown-key', 'helm', [
     'template', 'inference-platform', resolve(source, 'chart'), '--namespace', 'inference', '--set', 'unexpected=true',
   ], source);
+  const schemaWorkerLimitsOmitted = run('schema-worker-limits-omitted', 'helm', [
+    'template', 'inference-platform', resolve(source, 'chart'), '--namespace', 'inference', '--set-json', 'resources.worker.limits=null',
+  ], source);
+  const schemaWorkerLimitCpuWrong = run('schema-worker-limit-cpu-wrong', 'helm', [
+    'template', 'inference-platform', resolve(source, 'chart'), '--namespace', 'inference', '--set-string', 'resources.worker.limits.cpu=101m',
+  ], source);
 
   const kubeconform = run('kubeconform', 'kubeconform', ['-strict', '-summary', '-'], source, render.stdout);
   const normalized = run('normalize-render', 'yq', ['-s', 'map(select(. != null))', '-'], source, render.stdout);
@@ -286,11 +292,53 @@ async function main() {
     && !backendSchema?.required?.includes('token')
     && backendSchema?.properties?.existingSecret
     && !backendSchema?.properties?.token;
-  const workerSchemaPass = workerSchema?.$ref === '#/definitions/resources';
-  const fixedSchemaNegativesPass = schemaEmptyImage.exit !== 0 && schemaInvalidPort.exit !== 0 && schemaUnknownKey.exit !== 0;
-  const schemaChecksPass = RUN_SCHEMA_CHECKS && backendSchemaPass && workerSchemaPass && fixedSchemaNegativesPass;
+  const exactKeys = (value, expected) => (
+    value && typeof value === 'object'
+    && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort())
+  );
+  const exactRequired = (value, expected) => (
+    Array.isArray(value)
+    && JSON.stringify([...value].sort()) === JSON.stringify([...expected].sort())
+  );
+  const resourceDefinition = schema.definitions?.resources;
+  const resourceBranchPass = (name, expected) => {
+    const branch = resourceDefinition?.properties?.[name];
+    return branch?.type === 'object'
+      && branch?.additionalProperties === false
+      && exactRequired(branch.required, ['cpu', 'memory'])
+      && exactKeys(branch.properties, ['cpu', 'memory'])
+      && branch.properties.cpu?.type === 'string'
+      && branch.properties.cpu?.const === expected.cpu
+      && branch.properties.memory?.type === 'string'
+      && branch.properties.memory?.const === expected.memory;
+  };
+  const resourceDefinitionPass = resourceDefinition?.type === 'object'
+    && resourceDefinition?.additionalProperties === false
+    && exactRequired(resourceDefinition.required, ['requests', 'limits'])
+    && exactKeys(resourceDefinition.properties, ['requests', 'limits'])
+    && resourceBranchPass('requests', scope.exact_resources.worker.requests)
+    && resourceBranchPass('limits', scope.exact_resources.worker.limits);
+  const roleResourceRefsPass = roles.every((role) => (
+    schema.properties?.resources?.properties?.[role]?.$ref === '#/definitions/resources'
+  ));
+  const workerSchemaPass = workerSchema?.$ref === '#/definitions/resources' && resourceDefinitionPass;
+  const fixedSchemaNegativesPass = schemaEmptyImage.exit !== 0
+    && schemaInvalidPort.exit !== 0
+    && schemaUnknownKey.exit !== 0
+    && schemaWorkerLimitsOmitted.exit !== 0
+    && schemaWorkerLimitCpuWrong.exit !== 0;
+  const schemaChecksPass = RUN_SCHEMA_CHECKS
+    && backendSchemaPass
+    && workerSchemaPass
+    && roleResourceRefsPass
+    && fixedSchemaNegativesPass;
   if (RUN_SCHEMA_CHECKS) {
-    internalRecord('schema-worker-limits', ['internal:schema-contract', 'resources.worker.limits', 'backend.existingSecret'], schemaChecksPass ? 0 : 1, `${backendSchemaPass}:${workerSchemaPass}:${fixedSchemaNegativesPass}`);
+    internalRecord(
+      'schema-worker-limits',
+      ['internal:schema-contract', 'definitions.resources', 'resources.worker.limits', 'backend.existingSecret', '10m', '32Mi', '100m', '64Mi'],
+      schemaChecksPass ? 0 : 1,
+      `${backendSchemaPass}:${workerSchemaPass}:${roleResourceRefsPass}:${resourceDefinitionPass}:${fixedSchemaNegativesPass}`,
+    );
   }
 
   const learnerChartSources = learnerOwnedFiles.filter((file) => file.startsWith('chart/') && /\.(?:yaml|yml|json|tpl)$/.test(file));
@@ -365,7 +413,7 @@ async function main() {
     app_tests: status(appTests.exit === 0, `go test exit ${appTests.exit}`),
     helm_lint: status(helmLint.exit === 0, `helm lint exit ${helmLint.exit}`),
     render: status(render.exit === 0 && objects.length > 0, `${objects.length} rendered objects`),
-    schema: status(schemaChecksPass, `fixed negatives ${fixedSchemaNegativesPass}; external Secret schema ${Boolean(backendSchemaPass)}; worker limits schema ${workerSchemaPass}`),
+    schema: status(schemaChecksPass, `fixed negatives ${fixedSchemaNegativesPass}; external Secret schema ${Boolean(backendSchemaPass)}; all role refs ${roleResourceRefsPass}; exact resource definition ${Boolean(resourceDefinitionPass)}; worker limits schema ${workerSchemaPass}`),
     kubeconform: status(kubeconform.exit === 0, `exit ${kubeconform.exit}`),
     secret_scan: status(!secretMaterialFound, secretMaterialFound ? 'literal or rendered token material detected; value withheld' : 'no literal or rendered token material'),
     resource_limits: status(exactResourcesPass, exactResourcesPass ? 'all roles use exact 10m/32Mi requests and 100m/64Mi limits in values and render' : 'one or more source or rendered resource quantities differ'),

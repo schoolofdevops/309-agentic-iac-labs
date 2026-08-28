@@ -52,6 +52,31 @@ async function repairCandidate(source) {
     },
   };
   schema.properties.resources.properties.worker = {$ref: '#/definitions/resources'};
+  schema.definitions.resources = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['requests', 'limits'],
+    properties: {
+      requests: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['cpu', 'memory'],
+        properties: {
+          cpu: {type: 'string', const: '10m'},
+          memory: {type: 'string', const: '32Mi'},
+        },
+      },
+      limits: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['cpu', 'memory'],
+        properties: {
+          cpu: {type: 'string', const: '100m'},
+          memory: {type: 'string', const: '64Mi'},
+        },
+      },
+    },
+  };
   await writeFile(schemaPath, `${JSON.stringify(schema, null, 2)}\n`);
 
   const deploymentPath = join(source, 'chart/templates/deployment.yaml');
@@ -177,7 +202,7 @@ test('required evaluator mutations are killed', async (t) => {
   }
 });
 
-test('exact resource quantities reject wrong values for multiple roles', async (t) => {
+test('frozen schema rejects wrong resource values before rendered comparison', async (t) => {
   const cases = [
     ['API CPU request', '  api:\n    requests:\n      cpu: 10m\n      memory: 32Mi', '  api:\n    requests:\n      cpu: 20m\n      memory: 32Mi'],
     ['dependencies memory limit', '      cpu: 100m\n      memory: 64Mi\n  api:', '      cpu: 100m\n      memory: 96Mi\n  api:'],
@@ -193,10 +218,9 @@ test('exact resource quantities reject wrong values for multiple roles', async (
         assert.ok(values.includes(needle));
         await writeFile(valuesPath, values.replace(needle, replacement));
         const result = runEvaluator(runner, source, output);
-        assert.equal(result.status, 1, result.stdout + result.stderr);
-        const report = JSON.parse(await readFile(join(output, 'evidence-report.json'), 'utf8'));
-        assert.equal(report.gates.resource_limits.status, 'FAIL');
-        assert.ok(report.primary_findings.some(({id}) => id === 'incorrect-resource-quantities'));
+        assert.equal(result.status, 2, result.stdout + result.stderr);
+        assert.match(result.stderr, /Helm render failed with exit 1/i);
+        await assert.rejects(access(output));
       } finally {
         await rm(parent, {recursive: true, force: true});
       }
@@ -222,6 +246,58 @@ test('exact resource quantities reject wrong values for multiple roles', async (
       await rm(parent, {recursive: true, force: true});
     }
   });
+});
+
+test('Helm schema probes reject omitted worker limits and wrong frozen quantities', async () => {
+  const {parent, source} = await temporarySection('section-9-schema-probes-');
+  const output = join(parent, 'agentic-iac-section-9-schema-probes');
+  try {
+    await repairCandidate(source);
+    const result = runEvaluator(runner, source, output);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const report = JSON.parse(await readFile(join(output, 'evidence-report.json'), 'utf8'));
+    assert.equal(report.gates.schema.status, 'PASS');
+    for (const id of ['schema-worker-limits-omitted', 'schema-worker-limit-cpu-wrong']) {
+      const command = report.commands.find(({id: commandId}) => commandId === id);
+      assert.ok(command, `missing ${id} command evidence`);
+      assert.notEqual(command.exit, 0, `${id} must be rejected by Helm schema validation`);
+    }
+  } finally {
+    await rm(parent, {recursive: true, force: true});
+  }
+});
+
+test('launcher rejects weakened referenced resource definitions while worker keeps its ref', async (t) => {
+  const cases = [
+    ['limits no longer required', (definition) => {
+      definition.required = ['requests'];
+    }],
+    ['CPU request no longer frozen', (definition) => {
+      definition.properties.requests.properties.cpu = {type: 'string', minLength: 1};
+    }],
+  ];
+  for (const [name, weaken] of cases) {
+    await t.test(name, async () => {
+      const {parent, source} = await temporarySection('section-9-schema-definition-');
+      const output = join(parent, `agentic-iac-section-9-${name.replaceAll(' ', '-')}`);
+      try {
+        await repairCandidate(source);
+        const schemaPath = join(source, 'chart/values.schema.json');
+        const schema = JSON.parse(await readFile(schemaPath, 'utf8'));
+        assert.equal(schema.properties.resources.properties.worker.$ref, '#/definitions/resources');
+        weaken(schema.definitions.resources);
+        await writeFile(schemaPath, `${JSON.stringify(schema, null, 2)}\n`);
+
+        const result = runEvaluator(runner, source, output);
+        assert.equal(result.status, 1, result.stdout + result.stderr);
+        const report = JSON.parse(await readFile(join(output, 'evidence-report.json'), 'utf8'));
+        assert.equal(report.gates.schema.status, 'FAIL');
+        assert.ok(report.primary_findings.some(({id}) => id === 'missing-worker-resource-limits'));
+      } finally {
+        await rm(parent, {recursive: true, force: true});
+      }
+    });
+  }
 });
 
 test('secret scan catches assignments in deployment comments and schema literals', async (t) => {
