@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {access, chmod, mkdir, mkdtemp, readFile, writeFile} from 'node:fs/promises';
+import {access, chmod, mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -17,8 +17,9 @@ function run(args, options = {}) {
   });
 }
 
-async function fakeRuntime({clusters = '', architecture = 'arm64'} = {}) {
+async function fakeRuntime(testContext, {clusters = '', architecture = 'arm64'} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'agentic-iac-section-9-test-'));
+  testContext.after(async () => rm(root, {recursive: true, force: true}));
   const bin = join(root, 'bin');
   const log = join(root, 'commands.jsonl');
   await mkdir(bin);
@@ -49,8 +50,13 @@ test('runner discovers the actual named Kind node image instead of assuming a ve
   assert.doesNotMatch(source, /kindest\/node:v\d/);
 });
 
-test('preflight rejects a wrong cluster name before invoking runtime tools', async () => {
-  const runtime = await fakeRuntime();
+test('fake runtime fixtures register recursive cleanup with the owning test', async () => {
+  const source = await readFile(import.meta.filename, 'utf8');
+  assert.match(source, /async function fakeRuntime\(testContext,[\s\S]{0,800}testContext\.after\(async \(\) => rm\(root, \{recursive: true, force: true\}\)\)/);
+});
+
+test('preflight rejects a wrong cluster name before invoking runtime tools', async (testContext) => {
+  const runtime = await fakeRuntime(testContext);
   const output = join(runtime.root, 'agentic-iac-section-9-wrong-cluster');
   const result = run(['preflight', section, output, '--cluster', 'kind'], {env: runtime.env});
   assert.notEqual(result.status, 0);
@@ -59,8 +65,8 @@ test('preflight rejects a wrong cluster name before invoking runtime tools', asy
   await assert.rejects(access(output));
 });
 
-test('preflight refuses to adopt or delete an existing exact cluster', async () => {
-  const runtime = await fakeRuntime({clusters: 'agentic-iac-s9\n'});
+test('preflight refuses to adopt or delete an existing exact cluster', async (testContext) => {
+  const runtime = await fakeRuntime(testContext, {clusters: 'agentic-iac-s9\n'});
   const output = join(runtime.root, 'agentic-iac-section-9-existing-cluster');
   const result = run(['preflight', section, output], {env: runtime.env});
   assert.notEqual(result.status, 0);
@@ -71,8 +77,8 @@ test('preflight refuses to adopt or delete an existing exact cluster', async () 
   await assert.rejects(access(output));
 });
 
-test('preflight rejects a wrong namespace before invoking runtime tools', async () => {
-  const runtime = await fakeRuntime();
+test('preflight rejects a wrong namespace before invoking runtime tools', async (testContext) => {
+  const runtime = await fakeRuntime(testContext);
   const output = join(runtime.root, 'agentic-iac-section-9-wrong-namespace');
   const result = run(['preflight', section, output, '--namespace', 'default'], {env: runtime.env});
   assert.notEqual(result.status, 0);
@@ -81,8 +87,8 @@ test('preflight rejects a wrong namespace before invoking runtime tools', async 
   await assert.rejects(access(output));
 });
 
-test('cleanup rejects a missing marker without invoking Kind', async () => {
-  const runtime = await fakeRuntime();
+test('cleanup rejects a missing marker without invoking Kind', async (testContext) => {
+  const runtime = await fakeRuntime(testContext);
   const marker = join(runtime.root, 'agentic-iac-section-9-missing', '.section-9-kind-run.json');
   const result = run(['cleanup', marker], {env: runtime.env});
   assert.notEqual(result.status, 0);
@@ -90,8 +96,8 @@ test('cleanup rejects a missing marker without invoking Kind', async () => {
   await assert.rejects(access(runtime.log));
 });
 
-test('preflight rejects an unsupported Docker architecture', async () => {
-  const runtime = await fakeRuntime({architecture: 'riscv64'});
+test('preflight rejects an unsupported Docker architecture', async (testContext) => {
+  const runtime = await fakeRuntime(testContext, {architecture: 'riscv64'});
   const output = join(runtime.root, 'agentic-iac-section-9-unsupported-arch');
   const result = run(['preflight', section, output], {env: runtime.env});
   assert.notEqual(result.status, 0);
@@ -102,8 +108,8 @@ test('preflight rejects an unsupported Docker architecture', async () => {
   await assert.rejects(access(output));
 });
 
-test('cleanup refuses an unmarked cluster request and never invokes Kind', async () => {
-  const runtime = await fakeRuntime();
+test('cleanup refuses an unmarked cluster request and never invokes Kind', async (testContext) => {
+  const runtime = await fakeRuntime(testContext);
   const runDirectory = join(runtime.root, 'agentic-iac-section-9-unmarked');
   const marker = join(runDirectory, '.section-9-kind-run.json');
   await mkdir(runDirectory);
