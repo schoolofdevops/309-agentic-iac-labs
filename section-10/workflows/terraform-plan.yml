@@ -37,13 +37,12 @@ jobs:
           --engine terraform
           --source .
           --manifest "$RUNNER_TEMP/reviewed-change.json"
-          --output "$RUNNER_TEMP/agentic-iac-s10-plan-evidence"
+          --output /tmp/agentic-iac-s10-plan-evidence
 
       # Pin source: https://github.com/actions/upload-artifact/releases/tag/v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: section-10-terraform-plan
-          path: ${{ runner.temp }}/agentic-iac-s10-plan-evidence
+          path: /tmp/agentic-iac-s10-plan-evidence
           if-no-files-found: error
           retention-days: 7
-

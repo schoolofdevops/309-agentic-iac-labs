@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -22,6 +22,7 @@ const sectionRoot = join(here, "..");
 const runner = join(sectionRoot, "scripts", "run-reviewed-plan.mjs");
 const sourceTerraform = join(sectionRoot, "terraform");
 const sourceWorkflow = join(sectionRoot, "workflows", "terraform-plan.yml");
+const sourceScripts = join(sectionRoot, "scripts");
 const taskId = "section-10-task-2";
 
 function sha256(path) {
@@ -36,14 +37,22 @@ function git(cwd, args) {
 
 function makeSource() {
   const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-source-test-"));
+  mkdirSync(join(root, "section-10", "scripts"), { recursive: true });
   mkdirSync(join(root, "section-10", "workflows"), { recursive: true });
   cpSync(sourceTerraform, join(root, "section-10", "terraform"), { recursive: true });
   cpSync(sourceWorkflow, join(root, "section-10", "workflows", "terraform-plan.yml"));
+  cpSync(join(sourceScripts, "check-delivery-change.mjs"), join(root, "section-10", "scripts", "check-delivery-change.mjs"));
+  cpSync(join(sourceScripts, "run-reviewed-plan.mjs"), join(root, "section-10", "scripts", "run-reviewed-plan.mjs"));
+  const candidateMain = readFileSync(join(root, "section-10", "terraform", "main.tf"), "utf8");
+  writeFileSync(join(root, "section-10", "terraform", "main.tf"), candidateMain.replace('default     = "s10-v2"', 'default     = "s10-v1"'));
   git(root, ["init", "-q"]);
   git(root, ["config", "user.name", "Section 10 Test"]);
   git(root, ["config", "user.email", "section10@example.invalid"]);
   git(root, ["add", "."]);
-  git(root, ["commit", "-qm", "fixture"]);
+  git(root, ["commit", "-qm", "reviewed base"]);
+  writeFileSync(join(root, "section-10", "terraform", "main.tf"), candidateMain);
+  git(root, ["add", "section-10/terraform/main.tf"]);
+  git(root, ["commit", "-qm", "candidate delivery revision"]);
   return root;
 }
 
@@ -62,6 +71,7 @@ function newOutput(label = "run") {
 function manifestFor(source, overrides = {}) {
   return {
     task_id: taskId,
+    base_revision: git(source, ["rev-parse", "HEAD^"]),
     source_revision: git(source, ["rev-parse", "HEAD"]),
     workflow_sha256: sha256(join(source, "section-10", "workflows", "terraform-plan.yml")),
     proposer: "authoring-agent",
@@ -71,7 +81,7 @@ function manifestFor(source, overrides = {}) {
   };
 }
 
-function run(source, { engine = "terraform", manifest = manifestFor(source), output = newOutput(), manifestPath } = {}) {
+function run(source, { engine = "terraform", manifest = manifestFor(source), output = newOutput(), manifestPath, env = {} } = {}) {
   const createdManifestRoot = manifestPath ? undefined : mkdtempSync(join(tmpdir(), "agentic-iac-s10-manifest-test-"));
   const external = manifestPath ?? join(createdManifestRoot, "change.json");
   if (!manifestPath) writeFileSync(external, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -81,7 +91,7 @@ function run(source, { engine = "terraform", manifest = manifestFor(source), out
     "--source", source,
     "--manifest", external,
     "--output", output,
-  ], { encoding: "utf8", shell: false });
+  ], { encoding: "utf8", shell: false, env: { ...process.env, ...env } });
   if (createdManifestRoot) rmSync(createdManifestRoot, { recursive: true, force: true });
   return { ...result, output, manifestPath: external };
 }
@@ -118,7 +128,167 @@ test("rejects uncommitted source that cannot be identified by HEAD", () => {
   const manifest = manifestFor(source);
   writeFileSync(join(source, "section-10", "terraform", "unreviewed.tf"), "locals { unreviewed = true }\n");
   const result = run(source, { manifest });
-  expectRejected(result, "DIRTY_SOURCE");
+  expectRejected(result, "DIRTY_OR_IGNORED_SOURCE");
+  rmSync(source, { recursive: true, force: true });
+});
+
+test("rejects an ignored Terraform file even though immutable execution would not use it", () => {
+  const source = makeSource();
+  mkdirSync(join(source, "section-10", "terraform", ".terraform"));
+  writeFileSync(join(source, "section-10", "terraform", ".terraform", "ignored"), "caller-controlled\n");
+  const result = run(source);
+  expectRejected(result, "DIRTY_OR_IGNORED_SOURCE");
+  rmSync(source, { recursive: true, force: true });
+});
+
+test("rejects a committed evaluator that differs from the trusted launcher bytes", () => {
+  const source = makeSource();
+  const evaluator = join(source, "section-10", "scripts", "run-reviewed-plan.mjs");
+  writeFileSync(evaluator, `${readFileSync(evaluator, "utf8")}\n// attacker edit\n`);
+  git(source, ["add", "section-10/scripts/run-reviewed-plan.mjs"]);
+  git(source, ["commit", "-qm", "malicious protected base"]);
+  commitTerraformMutation(source, "placeholder.tf", "locals { placeholder = true }\n");
+  const result = run(source, { manifest: manifestFor(source, { changed_files: ["section-10/terraform/placeholder.tf"] }) });
+  expectRejected(result, "EVALUATOR_MISMATCH");
+  rmSync(source, { recursive: true, force: true });
+});
+
+test("rejects a manifest whose changed files do not equal the Git diff", () => {
+  const source = makeSource();
+  const result = run(source, { manifest: manifestFor(source, { changed_files: ["section-10/terraform/not-changed.tf"] }) });
+  expectRejected(result, "CHANGED_FILES_MISMATCH");
+  rmSync(source, { recursive: true, force: true });
+});
+
+test("rejects a real Git diff outside the reviewed Terraform scope", () => {
+  const source = makeSource();
+  writeFileSync(join(source, "README.md"), "unrelated candidate change\n");
+  git(source, ["add", "README.md"]);
+  git(source, ["commit", "-qm", "unrelated candidate"]);
+  const result = run(source, { manifest: manifestFor(source, { changed_files: ["README.md"] }) });
+  expectRejected(result, "CHANGE_SCOPE_FORBIDDEN");
+  rmSync(source, { recursive: true, force: true });
+});
+
+test("rejects an apply-mode Terraform test", () => {
+  const source = makeSource();
+  const testFile = join(source, "section-10", "terraform", "reviewed-plan.tftest.hcl");
+  writeFileSync(testFile, readFileSync(testFile, "utf8").replace("command = plan", "command = apply"));
+  git(source, ["add", "section-10/terraform/reviewed-plan.tftest.hcl"]);
+  git(source, ["commit", "-qm", "unsafe apply test"]);
+  const result = run(source, { manifest: manifestFor(source, { changed_files: ["section-10/terraform/reviewed-plan.tftest.hcl"] }) });
+  expectRejected(result, "TEST_INVARIANT");
+  rmSync(source, { recursive: true, force: true });
+});
+
+test("rejects arbitrary module execution added to an otherwise plan-mode Terraform test", () => {
+  const source = makeSource();
+  const testFile = join(source, "section-10", "terraform", "reviewed-plan.tftest.hcl");
+  writeFileSync(testFile, `${readFileSync(testFile, "utf8")}\nrun "arbitrary_module" {\n  command = plan\n  module { source = "../outside" }\n}\n`);
+  git(source, ["add", "section-10/terraform/reviewed-plan.tftest.hcl"]);
+  git(source, ["commit", "-qm", "unsafe arbitrary test module"]);
+  const result = run(source, { manifest: manifestFor(source, { changed_files: ["section-10/terraform/reviewed-plan.tftest.hcl"] }) });
+  expectRejected(result, "TEST_INVARIANT");
+  rmSync(source, { recursive: true, force: true });
+});
+
+for (const provisioner of ["local-exec", "remote-exec"]) {
+  test(`rejects a ${provisioner} provisioner before any Terraform command`, () => {
+    const source = makeSource();
+    const main = join(source, "section-10", "terraform", "main.tf");
+    writeFileSync(main, readFileSync(main, "utf8").replace(
+      "  input = {",
+      `  provisioner "${provisioner}" {\n    command = "false"\n  }\n\n  input = {`,
+    ));
+    git(source, ["add", "section-10/terraform/main.tf"]);
+    git(source, ["commit", "-qm", `unsafe ${provisioner}`]);
+    const result = run(source, { manifest: manifestFor(source) });
+    expectRejected(result, "EXECUTION_CONSTRUCT_FORBIDDEN");
+    rmSync(source, { recursive: true, force: true });
+  });
+}
+
+test("rejects arbitrary plan-time file evaluation in Terraform source", () => {
+  const source = makeSource();
+  const main = join(source, "section-10", "terraform", "main.tf");
+  writeFileSync(main, `${readFileSync(main, "utf8")}\nlocals { caller_file = file("/etc/hosts") }\n`);
+  git(source, ["add", "section-10/terraform/main.tf"]);
+  git(source, ["commit", "-qm", "unsafe plan-time file read"]);
+  const result = run(source);
+  expectRejected(result, "TERRAFORM_INVARIANT");
+  rmSync(source, { recursive: true, force: true });
+});
+
+test("ignores caller Terraform variables, CLI arguments, credentials, tokens, and proxies", () => {
+  const source = makeSource();
+  const callerData = join(source, "caller-tf-data");
+  const result = run(source, { env: {
+    HOME: source,
+    PATH: "/attacker-controlled-bin",
+    TF_CLI_ARGS: "-destroy",
+    TF_CLI_CONFIG_FILE: join(source, "attacker.tfrc"),
+    TF_DATA_DIR: callerData,
+    TF_VAR_delivery_revision: "s10-v1",
+    AWS_ACCESS_KEY_ID: "attacker",
+    GITHUB_TOKEN: "attacker",
+    HTTP_PROXY: "http://127.0.0.1:9",
+    HTTPS_PROXY: "http://127.0.0.1:9",
+    NO_PROXY: "*",
+  } });
+  assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(readFileSync(join(result.output, "reviewed-plan.json"), "utf8"));
+  assert.equal(plan.variables.delivery_revision.value, "s10-v2");
+  assert.equal(existsSync(callerData), false);
+  rmSync(result.output, { recursive: true, force: true });
+  rmSync(source, { recursive: true, force: true });
+});
+
+test("a post-validation worktree mutation cannot change the immutable plan input", { timeout: 120_000 }, async () => {
+  const source = makeSource();
+  const manifestRoot = mkdtempSync(join(tmpdir(), "agentic-iac-s10-toctou-manifest-"));
+  const manifestPath = join(manifestRoot, "change.json");
+  writeFileSync(manifestPath, `${JSON.stringify(manifestFor(source), null, 2)}\n`);
+  const output = newOutput("toctou");
+  const child = spawn(process.execPath, [
+    runner,
+    "--engine", "terraform",
+    "--source", source,
+    "--manifest", manifestPath,
+    "--output", output,
+  ], { encoding: "utf8", shell: false });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+
+  const marker = join(output, ".agentic-iac-s10-evidence-root");
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(marker) && child.exitCode === null && Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 2));
+  }
+  assert.equal(existsSync(marker), true, `runner did not reach materialization boundary: ${stderr}`);
+  assert.equal(child.exitCode, null, "mutation must occur while evaluator is still running");
+  const main = join(source, "section-10", "terraform", "main.tf");
+  writeFileSync(main, readFileSync(main, "utf8").replace('default     = "s10-v2"', 'default     = "s10-v1"'));
+
+  const status = await new Promise((resolveExit) => child.once("close", resolveExit));
+  assert.equal(status, 0, `${stdout}\n${stderr}`);
+  const plan = JSON.parse(readFileSync(join(output, "reviewed-plan.json"), "utf8"));
+  assert.equal(plan.variables.delivery_revision.value, "s10-v2");
+  rmSync(output, { recursive: true, force: true });
+  rmSync(manifestRoot, { recursive: true, force: true });
+  rmSync(source, { recursive: true, force: true });
+});
+
+test("rejects a caller-controlled output parent even when it is below OS temp", () => {
+  const source = makeSource();
+  const parent = mkdtempSync(join(tmpdir(), "agentic-iac-s10-caller-parent-"));
+  const output = join(parent, "agentic-iac-s10-evidence");
+  const result = run(source, { output });
+  expectRejected(result, "OUTPUT_PARENT_FORBIDDEN");
+  rmSync(parent, { recursive: true, force: true });
   rmSync(source, { recursive: true, force: true });
 });
 
@@ -134,7 +304,7 @@ for (const [label, name, contents, code] of forbiddenTerraformSources) {
   test(`rejects Terraform source containing ${label}`, () => {
     const source = makeSource();
     commitTerraformMutation(source, name, contents);
-    const result = run(source);
+    const result = run(source, { manifest: manifestFor(source, { changed_files: [`section-10/terraform/${name}`] }) });
     expectRejected(result, code);
     rmSync(source, { recursive: true, force: true });
   });
@@ -145,7 +315,7 @@ test("rejects ignored Terraform working data instead of copying it into evidence
   mkdirSync(join(source, "section-10", "terraform", ".terraform"));
   writeFileSync(join(source, "section-10", "terraform", ".terraform", "injected"), "unreviewed\n");
   const result = run(source);
-  expectRejected(result, "UNEXPECTED_TERRAFORM_SOURCE");
+  expectRejected(result, "DIRTY_OR_IGNORED_SOURCE");
   rmSync(source, { recursive: true, force: true });
 });
 
@@ -171,7 +341,7 @@ test("rejects a symlink in the reviewed Terraform source", () => {
   rmSync(main);
   symlinkSync(outside, main);
   const result = run(source);
-  expectRejected(result, "SYMLINK_FORBIDDEN");
+  expectRejected(result, "DIRTY_OR_IGNORED_SOURCE");
   rmSync(source, { recursive: true, force: true });
   rmSync(outside, { force: true });
 });

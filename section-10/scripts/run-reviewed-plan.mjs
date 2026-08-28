@@ -3,12 +3,10 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -20,9 +18,21 @@ import { fileURLToPath } from "node:url";
 const TASK_ID = "section-10-task-2";
 const WORKFLOW_RELATIVE_PATH = "section-10/workflows/terraform-plan.yml";
 const TERRAFORM_RELATIVE_PATH = "section-10/terraform";
+const CHECKER_RELATIVE_PATH = "section-10/scripts/check-delivery-change.mjs";
+const RUNNER_RELATIVE_PATH = "section-10/scripts/run-reviewed-plan.mjs";
+const SAFE_WORKFLOW_SHA256 = "1cef58c8665dd364842b489e876980f28f9c63d26a7fa8ecb30eac8de69d1307";
+const SAFE_TEST_SHA256 = "45cb820aec176450d9f09fac29f34316e9cd85f3f006ce453c58a8b0f0df8a3a";
+const SAFE_MAIN_SHA256 = "1be8f6407f2726f5b346ed9a761ce69700fb1884f2fdb48d52789f694148fd46";
+const GIT = "/usr/bin/git";
 const ENGINE = {
-  terraform: { executable: "terraform", version: "1.14.8" },
-  opentofu: { executable: "tofu", version: "1.12.6" },
+  terraform: {
+    version: "1.14.8",
+    candidates: ["/opt/homebrew/bin/terraform", "/usr/local/bin/terraform", "/usr/bin/terraform"],
+  },
+  opentofu: {
+    version: "1.12.6",
+    candidates: ["/opt/homebrew/bin/tofu", "/usr/local/bin/tofu", "/usr/bin/tofu"],
+  },
 };
 
 class GuardError extends Error {
@@ -42,75 +52,56 @@ function argument(name) {
   return process.argv[index + 1];
 }
 
-function hashFile(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
-function fixedCommand(executable, args, cwd) {
+function hashFile(path) {
+  return sha256(readFileSync(path));
+}
+
+function gitEnvironment() {
+  return {
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_NO_REPLACE_OBJECTS: "1",
+    HOME: realpathSync(tmpdir()),
+    LANG: "C",
+    LC_ALL: "C",
+    PATH: "/usr/bin:/bin",
+  };
+}
+
+function command(executable, args, cwd, env, acceptedStatuses = [0]) {
   const result = spawnSync(executable, args, {
     cwd,
     encoding: "utf8",
     shell: false,
-    env: { ...process.env, TF_IN_AUTOMATION: "true", CHECKPOINT_DISABLE: "1" },
+    env,
     timeout: 60_000,
     killSignal: "SIGKILL",
   });
-  if (result.status !== 0) {
-    reject("COMMAND_FAILED", `${executable} ${args[0]} failed:\n${result.stderr || result.stdout}`);
+  if (!acceptedStatuses.includes(result.status)) {
+    const detail = result.error?.message ?? result.stderr ?? result.stdout;
+    reject("COMMAND_FAILED", `${basename(executable)} ${args[0]} failed:\n${detail}`);
   }
-  return result.stdout;
+  return result;
 }
 
-function assertNoSymlinks(root) {
-  if (lstatSync(root).isSymbolicLink()) reject("SYMLINK_FORBIDDEN", root);
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    const path = join(root, entry.name);
-    if (lstatSync(path).isSymbolicLink()) reject("SYMLINK_FORBIDDEN", path);
-    if (entry.isDirectory()) assertNoSymlinks(path);
-  }
+function git(source, args, acceptedStatuses = [0]) {
+  return command(GIT, args, source, gitEnvironment(), acceptedStatuses);
 }
 
-function validateTerraformSource(root) {
-  const files = [];
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isFile() || !(entry.name.endsWith(".tf") || entry.name.endsWith(".tftest.hcl"))) {
-      reject("UNEXPECTED_TERRAFORM_SOURCE", entry.name);
-    }
-    const path = join(root, entry.name);
-    const source = readFileSync(path, "utf8");
-    if (/\brequired_providers\b|\bprovider\s+"/.test(source)) reject("PROVIDER_FORBIDDEN", entry.name);
-    if (/\bbackend\s+"|\bcloud\s*\{/.test(source)) reject("BACKEND_FORBIDDEN", entry.name);
-    if (/https?:\/\//.test(source)) reject("NETWORK_SOURCE_FORBIDDEN", entry.name);
-    if (/\bmodule\s+"/.test(source)) reject("MODULE_FORBIDDEN", entry.name);
-    if (/\b(?:credential|access_key|secret_key|token)\s*=/.test(source)) reject("CREDENTIAL_FORBIDDEN", entry.name);
-    for (const match of source.matchAll(/\bresource\s+"([^"]+)"/g)) {
-      if (match[1] !== "terraform_data") reject("RESOURCE_TYPE_FORBIDDEN", match[1]);
-    }
-    files.push(entry.name);
-  }
-  return files.sort();
+function gitText(source, args) {
+  return git(source, args).stdout;
 }
 
-function assertOutputPath(output) {
-  const temporaryRoot = resolve(tmpdir());
-  const canonicalTemporaryRoot = realpathSync(temporaryRoot);
-  const absolute = resolve(output);
-  if (absolute === temporaryRoot || !absolute.startsWith(`${temporaryRoot}${sep}`)) {
-    reject("OUTPUT_OUTSIDE_TEMP", absolute);
-  }
-  if (!basename(absolute).startsWith("agentic-iac-s10-")) {
-    reject("OUTPUT_PREFIX", "evidence directory must use the agentic-iac-s10- prefix");
-  }
-  if (existsSync(absolute)) reject("OUTPUT_EXISTS", absolute);
-  let cursor = dirname(absolute);
-  while (cursor.startsWith(`${temporaryRoot}${sep}`)) {
-    if (lstatSync(cursor).isSymbolicLink()) reject("OUTPUT_SYMLINK", cursor);
-    if (cursor === temporaryRoot) break;
-    cursor = dirname(cursor);
-  }
-  const expectedCanonicalParent = join(canonicalTemporaryRoot, relative(temporaryRoot, dirname(absolute)));
-  if (realpathSync(dirname(absolute)) !== expectedCanonicalParent) reject("OUTPUT_SYMLINK", dirname(absolute));
-  return absolute;
+function gitHead(source) {
+  return gitText(source, ["rev-parse", "HEAD"]).trim();
+}
+
+function gitBlob(source, revision, path) {
+  return gitText(source, ["show", `${revision}:${path}`]);
 }
 
 function readManifest(path) {
@@ -121,27 +112,46 @@ function readManifest(path) {
   }
 }
 
-function gitHead(source) {
-  const result = spawnSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8", shell: false });
-  if (result.status !== 0) reject("SOURCE_NOT_GIT", result.stderr);
-  return result.stdout.trim();
-}
-
 function assertReviewedSourceClean(source) {
-  const result = spawnSync("git", [
-    "status", "--porcelain", "--untracked-files=all", "--",
-    TERRAFORM_RELATIVE_PATH, WORKFLOW_RELATIVE_PATH,
-  ], { cwd: source, encoding: "utf8", shell: false });
-  if (result.status !== 0) reject("SOURCE_NOT_GIT", result.stderr);
-  if (result.stdout.trim()) reject("DIRTY_SOURCE", "reviewed Terraform or workflow bytes are not committed at HEAD");
+  const status = gitText(source, [
+    "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--",
+    TERRAFORM_RELATIVE_PATH, WORKFLOW_RELATIVE_PATH, CHECKER_RELATIVE_PATH, RUNNER_RELATIVE_PATH,
+  ]).trim();
+  if (status) reject("DIRTY_OR_IGNORED_SOURCE", status);
 }
 
-function validateChange(manifest, source, workflowPath) {
+function validateChangedPath(source, changed) {
+  if (typeof changed !== "string" || isAbsolute(changed)) reject("SOURCE_ESCAPE", String(changed));
+  const resolved = resolve(source, changed);
+  if (!resolved.startsWith(`${source}${sep}`)) reject("SOURCE_ESCAPE", changed);
+  const normalized = changed.replaceAll("\\", "/");
+  if (normalized === WORKFLOW_RELATIVE_PATH || normalized === CHECKER_RELATIVE_PATH || normalized === RUNNER_RELATIVE_PATH || /(^|\/)\.github\/workflows\//.test(normalized) || /(^|\/)workflows\/[^/]+\.ya?ml$/.test(normalized)) {
+    reject("WORKFLOW_IMMUTABLE", changed);
+  }
+  if (!/^section-10\/terraform\/[^/]+(?:\.tf|\.tftest\.hcl)$/.test(normalized)) {
+    reject("CHANGE_SCOPE_FORBIDDEN", changed);
+  }
+  return normalized;
+}
+
+function actualChangedFiles(source, baseRevision, sourceRevision) {
+  const ancestry = git(source, ["merge-base", "--is-ancestor", baseRevision, sourceRevision], [0, 1]);
+  if (ancestry.status !== 0) reject("BASE_NOT_ANCESTOR", "base_revision must be an ancestor of source_revision");
+  return gitText(source, ["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", `${baseRevision}..${sourceRevision}`, "--"])
+    .split("\0")
+    .filter(Boolean)
+    .sort();
+}
+
+function validateChange(manifest, source, workflowBytes) {
   if (manifest.task_id !== TASK_ID) reject("TASK_ID_MISMATCH", "unexpected task_id");
   if (!/^[0-9a-f]{40}$/.test(manifest.source_revision ?? "") || manifest.source_revision !== gitHead(source)) {
     reject("STALE_SOURCE_REVISION", "manifest is not bound to current Git HEAD");
   }
-  if (!/^[0-9a-f]{64}$/.test(manifest.workflow_sha256 ?? "") || manifest.workflow_sha256 !== hashFile(workflowPath)) {
+  if (!/^[0-9a-f]{40}$/.test(manifest.base_revision ?? "")) {
+    reject("BASE_REVISION_INVALID", "base_revision must be a full Git commit SHA");
+  }
+  if (!/^[0-9a-f]{64}$/.test(manifest.workflow_sha256 ?? "") || manifest.workflow_sha256 !== sha256(workflowBytes)) {
     reject("WORKFLOW_HASH_MISMATCH", "safe workflow bytes changed after review");
   }
   if (typeof manifest.proposer !== "string" || typeof manifest.approver !== "string" || !manifest.proposer || !manifest.approver) {
@@ -151,68 +161,173 @@ function validateChange(manifest, source, workflowPath) {
   if (!Array.isArray(manifest.changed_files) || manifest.changed_files.length === 0) {
     reject("CHANGED_FILES_REQUIRED", "candidate manifest has no changed files");
   }
-  for (const changed of manifest.changed_files) {
-    if (typeof changed !== "string" || isAbsolute(changed)) reject("SOURCE_ESCAPE", String(changed));
-    const resolved = resolve(source, changed);
-    if (!resolved.startsWith(`${source}${sep}`)) reject("SOURCE_ESCAPE", changed);
-    const normalized = changed.replaceAll("\\", "/");
-    if (normalized === WORKFLOW_RELATIVE_PATH || /(^|\/)\.github\/workflows\//.test(normalized) || /(^|\/)workflows\/[^/]+\.ya?ml$/.test(normalized)) {
-      reject("WORKFLOW_IMMUTABLE", changed);
-    }
+  const claimed = [...new Set(manifest.changed_files.map((changed) => validateChangedPath(source, changed)))].sort();
+  if (claimed.length !== manifest.changed_files.length) reject("CHANGED_FILES_MISMATCH", "duplicate changed-file claims");
+  const actual = actualChangedFiles(source, manifest.base_revision, manifest.source_revision);
+  if (JSON.stringify(claimed) !== JSON.stringify(actual)) {
+    reject("CHANGED_FILES_MISMATCH", `claimed ${JSON.stringify(claimed)}, actual ${JSON.stringify(actual)}`);
   }
 }
 
-function engineVersion(profile) {
-  const raw = fixedCommand(profile.executable, ["version", "-json"], process.cwd());
-  const version = JSON.parse(raw).terraform_version;
-  if (version !== profile.version) reject("ENGINE_VERSION_MISMATCH", `expected ${profile.version}, got ${version}`);
-  return version;
+function assertEvaluatorInvariant(source, revision) {
+  const currentRunner = readFileSync(fileURLToPath(import.meta.url));
+  const currentCheckerPath = join(dirname(fileURLToPath(import.meta.url)), "check-delivery-change.mjs");
+  const currentChecker = readFileSync(currentCheckerPath);
+  const committedRunner = Buffer.from(gitBlob(source, revision, RUNNER_RELATIVE_PATH));
+  const committedChecker = Buffer.from(gitBlob(source, revision, CHECKER_RELATIVE_PATH));
+  if (!currentRunner.equals(committedRunner) || !currentChecker.equals(committedChecker)) {
+    reject("EVALUATOR_MISMATCH", "trusted launcher/checker bytes differ from source_revision");
+  }
+  return { runner: committedRunner, checker: committedChecker };
+}
+
+function immutableTerraformFiles(source, revision) {
+  const listing = gitText(source, ["ls-tree", "-rz", revision, "--", TERRAFORM_RELATIVE_PATH]);
+  const files = [];
+  for (const record of listing.split("\0").filter(Boolean)) {
+    const [metadata, path] = record.split("\t");
+    const [mode, type] = metadata.split(" ");
+    const name = relative(TERRAFORM_RELATIVE_PATH, path);
+    if (mode !== "100644" || type !== "blob" || name.includes(sep) || !(name.endsWith(".tf") || name.endsWith(".tftest.hcl"))) {
+      reject("UNEXPECTED_TERRAFORM_SOURCE", path);
+    }
+    files.push({ name, bytes: Buffer.from(gitBlob(source, revision, path)) });
+  }
+  if (files.length === 0) reject("UNEXPECTED_TERRAFORM_SOURCE", "empty Terraform tree");
+  return files.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function validateTerraformFiles(files) {
+  const tests = files.filter(({ name }) => name.endsWith(".tftest.hcl"));
+  if (tests.length !== 1 || tests[0].name !== "reviewed-plan.tftest.hcl" || sha256(tests[0].bytes) !== SAFE_TEST_SHA256) {
+    reject("TEST_INVARIANT", "the only executable test must be the protected plan-only test");
+  }
+  for (const { name, bytes } of files.filter((file) => file.name.endsWith(".tf"))) {
+    const source = bytes.toString("utf8");
+    if (/\brequired_providers\b|\bprovider\s+"/.test(source)) reject("PROVIDER_FORBIDDEN", name);
+    if (/\bbackend\s+"|\bcloud\s*\{/.test(source)) reject("BACKEND_FORBIDDEN", name);
+    if (/https?:\/\//.test(source)) reject("NETWORK_SOURCE_FORBIDDEN", name);
+    if (/\bmodule\s+"|\bdata\s+"|\bterraform_remote_state\b/.test(source)) reject("MODULE_FORBIDDEN", name);
+    if (/\b(?:credential|access_key|secret_key|token)\s*=/.test(source)) reject("CREDENTIAL_FORBIDDEN", name);
+    if (/\bprovisioner\s+"|\bconnection\s*\{|\blocal-exec\b|\bremote-exec\b/.test(source)) {
+      reject("EXECUTION_CONSTRUCT_FORBIDDEN", name);
+    }
+    for (const match of source.matchAll(/\bresource\s+"([^"]+)"/g)) {
+      if (match[1] !== "terraform_data") reject("RESOURCE_TYPE_FORBIDDEN", match[1]);
+    }
+  }
+  const main = files.find(({ name }) => name === "main.tf");
+  if (files.length !== 2 || !main || sha256(main.bytes) !== SAFE_MAIN_SHA256) {
+    reject("TERRAFORM_INVARIANT", "source_revision must contain only the protected provider-free fixture bytes");
+  }
+}
+
+function trustedEngine(profile) {
+  for (const candidate of profile.candidates) {
+    if (!existsSync(candidate)) continue;
+    const executable = realpathSync(candidate);
+    if (lstatSync(executable).isFile()) return executable;
+  }
+  reject("ENGINE_NOT_TRUSTED", `none of the fixed engine paths exist: ${profile.candidates.join(", ")}`);
+}
+
+function createOutput(requested, source) {
+  const logicalTemporaryRoot = resolve(tmpdir());
+  const canonicalTemporaryRoot = realpathSync(logicalTemporaryRoot);
+  const absolute = resolve(requested);
+  if (absolute === logicalTemporaryRoot || (!absolute.startsWith(`${logicalTemporaryRoot}${sep}`) && !absolute.startsWith(`${canonicalTemporaryRoot}${sep}`))) {
+    reject("OUTPUT_OUTSIDE_TEMP", absolute);
+  }
+  if (!basename(absolute).startsWith("agentic-iac-s10-")) reject("OUTPUT_PREFIX", basename(absolute));
+  const parent = dirname(absolute);
+  if (lstatSync(parent).isSymbolicLink()) reject("OUTPUT_SYMLINK", parent);
+  const canonicalParent = realpathSync(parent);
+  if (canonicalParent.startsWith(`${source}${sep}`) || canonicalParent === source) reject("OUTPUT_IN_SOURCE", parent);
+  if (canonicalParent !== canonicalTemporaryRoot) reject("OUTPUT_PARENT_FORBIDDEN", parent);
+  const output = join(canonicalTemporaryRoot, basename(absolute));
+  try {
+    mkdirSync(output, { mode: 0o700 });
+  } catch (error) {
+    if (error.code === "EEXIST") reject("OUTPUT_EXISTS", output);
+    reject("OUTPUT_CREATE_FAILED", error.message);
+  }
+  return output;
+}
+
+function executionEnvironment(output) {
+  const home = join(output, "home");
+  const data = join(output, "tf-data");
+  const temporary = join(output, "tmp");
+  for (const directory of [home, data, temporary]) mkdirSync(directory, { mode: 0o700 });
+  return {
+    CHECKPOINT_DISABLE: "1",
+    HOME: home,
+    LANG: "C",
+    LC_ALL: "C",
+    PATH: "/usr/bin:/bin",
+    TF_DATA_DIR: data,
+    TF_IN_AUTOMATION: "true",
+    TMPDIR: temporary,
+  };
+}
+
+function materialize(output, terraformFiles, workflowBytes, checkerBytes) {
+  const workingDirectory = join(output, "work", "terraform");
+  const workflowPath = join(output, "work", "workflow", "terraform-plan.yml");
+  const checkerPath = join(output, "work", "scripts", "check-delivery-change.mjs");
+  mkdirSync(workingDirectory, { recursive: true, mode: 0o700 });
+  mkdirSync(dirname(workflowPath), { recursive: true, mode: 0o700 });
+  mkdirSync(dirname(checkerPath), { recursive: true, mode: 0o700 });
+  for (const { name, bytes } of terraformFiles) writeFileSync(join(workingDirectory, name), bytes, { mode: 0o600 });
+  writeFileSync(workflowPath, workflowBytes, { mode: 0o600 });
+  writeFileSync(checkerPath, checkerBytes, { mode: 0o600 });
+  return { workingDirectory, workflowPath, checkerPath };
 }
 
 function main() {
   let output;
-  let createdOutput = false;
   try {
     const engineName = argument("--engine");
     const profile = ENGINE[engineName];
     if (!profile) reject("UNKNOWN_ENGINE", "accepted values are exactly terraform and opentofu");
+    const executable = trustedEngine(profile);
     const sourceInput = argument("--source");
     if (lstatSync(sourceInput).isSymbolicLink()) reject("SYMLINK_FORBIDDEN", sourceInput);
     const source = realpathSync(sourceInput);
-    const terraformSource = join(source, TERRAFORM_RELATIVE_PATH);
-    const workflowPath = join(source, WORKFLOW_RELATIVE_PATH);
-    assertNoSymlinks(terraformSource);
-    const terraformFiles = validateTerraformSource(terraformSource);
-    assertNoSymlinks(dirname(workflowPath));
     const manifestPath = argument("--manifest");
     if (lstatSync(manifestPath).isSymbolicLink()) reject("SYMLINK_FORBIDDEN", manifestPath);
     const manifest = readManifest(manifestPath);
     assertReviewedSourceClean(source);
-    validateChange(manifest, source, workflowPath);
+    if (!/^[0-9a-f]{40}$/.test(manifest.source_revision ?? "") || manifest.source_revision !== gitHead(source)) {
+      reject("STALE_SOURCE_REVISION", "manifest is not bound to current Git HEAD");
+    }
 
-    const checker = join(dirname(fileURLToPath(import.meta.url)), "check-delivery-change.mjs");
-    fixedCommand(process.execPath, [checker, "--workflow", workflowPath], source);
-    const version = engineVersion(profile);
-    output = assertOutputPath(argument("--output"));
-    const canonicalOutput = join(realpathSync(tmpdir()), relative(resolve(tmpdir()), output));
-    if (canonicalOutput.startsWith(`${source}${sep}`)) reject("OUTPUT_IN_SOURCE", "evidence cannot be written inside reviewed Git source");
-    mkdirSync(output, { mode: 0o700 });
-    createdOutput = true;
+    const workflowBytes = Buffer.from(gitBlob(source, manifest.source_revision, WORKFLOW_RELATIVE_PATH));
+    if (sha256(workflowBytes) !== SAFE_WORKFLOW_SHA256) reject("WORKFLOW_INVARIANT", "source_revision does not contain the protected workflow");
+    validateChange(manifest, source, workflowBytes);
+    const evaluator = assertEvaluatorInvariant(source, manifest.source_revision);
+    const terraformFiles = immutableTerraformFiles(source, manifest.source_revision);
+    validateTerraformFiles(terraformFiles);
+
+    output = createOutput(argument("--output"), source);
     writeFileSync(join(output, ".agentic-iac-s10-evidence-root"), `${TASK_ID}\n`, { mode: 0o600 });
+    const env = executionEnvironment(output);
+    const materialized = materialize(output, terraformFiles, workflowBytes, evaluator.checker);
+    command(process.execPath, [materialized.checkerPath, "--workflow", materialized.workflowPath], output, env);
+    const versionJson = command(executable, ["version", "-json"], materialized.workingDirectory, env).stdout;
+    const version = JSON.parse(versionJson).terraform_version;
+    if (version !== profile.version) reject("ENGINE_VERSION_MISMATCH", `expected ${profile.version}, got ${version}`);
 
-    const workingDirectory = join(output, "work", "terraform");
-    mkdirSync(workingDirectory, { recursive: true, mode: 0o700 });
-    for (const name of terraformFiles) cpSync(join(terraformSource, name), join(workingDirectory, name));
-    fixedCommand(profile.executable, ["fmt", "-check", "-recursive"], workingDirectory);
-    fixedCommand(profile.executable, ["init", "-backend=false", "-input=false", "-no-color"], workingDirectory);
-    fixedCommand(profile.executable, ["validate", "-no-color"], workingDirectory);
-    fixedCommand(profile.executable, ["test", "-no-color"], workingDirectory);
-
+    command(executable, ["fmt", "-check", "-recursive"], materialized.workingDirectory, env);
+    command(executable, ["init", "-backend=false", "-input=false", "-no-color"], materialized.workingDirectory, env);
+    command(executable, ["validate", "-no-color"], materialized.workingDirectory, env);
+    command(executable, ["test", "-no-color"], materialized.workingDirectory, env);
     const planPath = join(output, "reviewed.tfplan");
-    fixedCommand(profile.executable, ["plan", "-input=false", "-lock=false", "-no-color", `-out=${planPath}`], workingDirectory);
+    command(executable, ["plan", "-input=false", "-lock=false", "-no-color", `-out=${planPath}`], materialized.workingDirectory, env);
     const planJsonPath = join(output, "reviewed-plan.json");
-    writeFileSync(planJsonPath, fixedCommand(profile.executable, ["show", "-json", planPath], workingDirectory), { mode: 0o600 });
-    const planJson = JSON.parse(readFileSync(planJsonPath, "utf8"));
+    const planJsonBytes = command(executable, ["show", "-json", planPath], materialized.workingDirectory, env).stdout;
+    writeFileSync(planJsonPath, planJsonBytes, { mode: 0o600 });
+    const planJson = JSON.parse(planJsonBytes);
     const resourceAddresses = [...new Set((planJson.resource_changes ?? []).map((change) => change.address))].sort();
     if (resourceAddresses.length === 0) reject("EMPTY_PLAN", "accepted evidence must name reviewed resources");
 
@@ -221,7 +336,7 @@ function main() {
       source_revision: manifest.source_revision,
       engine: engineName,
       engine_version: version,
-      workflow_sha256: hashFile(workflowPath),
+      workflow_sha256: sha256(workflowBytes),
       plan_sha256: hashFile(planPath),
       plan_json_sha256: hashFile(planJsonPath),
       resource_addresses: resourceAddresses,
@@ -237,10 +352,11 @@ function main() {
       },
       apply_permitted: false,
     };
-    writeFileSync(join(output, "plan-evidence.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
-    process.stdout.write(`READY_FOR_HUMAN_REVIEW ${join(output, "plan-evidence.json")}\n`);
+    const reportPath = join(output, "plan-evidence.json");
+    writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    process.stdout.write(`READY_FOR_HUMAN_REVIEW ${reportPath}\n`);
   } catch (error) {
-    if (createdOutput && output && existsSync(output)) rmSync(output, { recursive: true, force: true });
+    if (output && existsSync(output)) rmSync(output, { recursive: true, force: true });
     const code = error instanceof GuardError ? error.code : "RUNNER_ERROR";
     process.stderr.write(`REJECTED ${code}: ${error.message}\n`);
     process.exitCode = 1;
