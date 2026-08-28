@@ -60,7 +60,7 @@ inference-platform-api-...                0/1     Running   0
 Read the API warning event.
 
 ```bash
-command kubectl --context kind-agentic-iac-s9 --namespace inference get events --field-selector type=Warning --sort-by=.metadata.creationTimestamp | command rg 'inference-platform-api|LAST SEEN'
+command kubectl --context kind-agentic-iac-s9 --namespace inference get events --field-selector type=Warning --sort-by=.metadata.creationTimestamp | command grep -E 'inference-platform-api|LAST SEEN'
 ```
 
 [ sample output ]
@@ -112,7 +112,7 @@ command kubectl --context kind-agentic-iac-s9 --namespace inference logs --selec
 Read the Helm render. The release still intends `/readyz`.
 
 ```bash
-helm get manifest inference-platform --kube-context kind-agentic-iac-s9 --namespace inference | command rg -n 'path: /readyz'
+helm get manifest inference-platform --kube-context kind-agentic-iac-s9 --namespace inference | command grep 'path: /readyz'
 ```
 
 [ sample output ]
@@ -244,7 +244,7 @@ inference-platform-worker-...             0/1     Running   0
 Read the worker warning event.
 
 ```bash
-command kubectl --context kind-agentic-iac-s9 --namespace inference get events --field-selector type=Warning --sort-by=.metadata.creationTimestamp | command rg 'inference-platform-worker|LAST SEEN'
+command kubectl --context kind-agentic-iac-s9 --namespace inference get events --field-selector type=Warning --sort-by=.metadata.creationTimestamp | command grep -E 'inference-platform-worker|LAST SEEN'
 ```
 
 [ sample output ]
@@ -295,7 +295,7 @@ command kubectl --context kind-agentic-iac-s9 --namespace inference logs --selec
 Read the Helm render. It still uses the ConfigMap reference.
 
 ```bash
-helm get manifest inference-platform --kube-context kind-agentic-iac-s9 --namespace inference | command rg -n -A 5 'name: BACKEND_URL'
+helm get manifest inference-platform --kube-context kind-agentic-iac-s9 --namespace inference | command awk '/name: BACKEND_URL/{lines=5} lines{print; lines--}'
 ```
 
 [ sample output ]
@@ -467,7 +467,7 @@ command kubectl --context kind-agentic-iac-s9 --namespace inference logs --selec
 Read the stored Helm value and rendered Service.
 
 ```bash
-helm get values inference-platform --kube-context kind-agentic-iac-s9 --namespace inference --all | command rg -n -A 3 'nodePort:'
+helm get values inference-platform --kube-context kind-agentic-iac-s9 --namespace inference --all | command awk '/nodePort:/{print "nodePort:", $2; exit}'
 ```
 
 [ sample output ]
@@ -477,7 +477,7 @@ nodePort: 30081
 ```
 
 ```bash
-helm get manifest inference-platform --kube-context kind-agentic-iac-s9 --namespace inference | command rg -n -A 3 'nodePort:'
+helm get manifest inference-platform --kube-context kind-agentic-iac-s9 --namespace inference | command awk '/nodePort:/{print "nodePort:", $2; exit}'
 ```
 
 [ sample output ]
@@ -574,7 +574,7 @@ inference-platform-api-...     IPv4          8080    10.244.0.8
 Read the restored render.
 
 ```bash
-helm get manifest inference-platform --kube-context kind-agentic-iac-s9 --namespace inference | command rg -n -A 3 'nodePort:'
+helm get manifest inference-platform --kube-context kind-agentic-iac-s9 --namespace inference | command awk '/nodePort:/{print "nodePort:", $2; exit}'
 ```
 
 [ Expected output ]

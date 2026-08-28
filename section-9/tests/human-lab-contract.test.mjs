@@ -59,6 +59,19 @@ test('challenge recovery is exact and preserves the proof boundary', () => {
   assert.match(key, /rollout status/);
 });
 
+test('challenge uses portable evidence filters and exact one-line NodePort output', () => {
+  const task = read('challenge/task.md');
+  assert.doesNotMatch(task, /\b(?:command\s+)?rg\b/);
+  assert.match(task, /\| command grep -E 'inference-platform-api\|LAST SEEN'/);
+  assert.match(task, /\| command grep 'path: \/readyz'/);
+  assert.match(task, /\| command grep -E 'inference-platform-worker\|LAST SEEN'/);
+
+  const nodePortCommand = /\| command awk '\/nodePort:\/\{print "nodePort:", \$2; exit\}'/g;
+  assert.equal((task.match(nodePortCommand) || []).length, 3);
+  assert.equal((task.match(/```text\nnodePort: 30081\n```/g) || []).length, 2);
+  assert.equal((task.match(/```text\nnodePort: 30080\n```/g) || []).length, 1);
+});
+
 test('pinned recovery patch is the exact three-file candidate diff', () => {
   const candidate = '718fd28edab8a026bab114c0f21800e2df450c83';
   const baseline = 'fdcc15c57c9879b3f15d03319ad5dd394e2706f2';
