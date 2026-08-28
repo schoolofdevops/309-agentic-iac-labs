@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {readFileSync} from 'node:fs';
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import test from 'node:test';
 
 const root = new URL('../', import.meta.url);
@@ -10,9 +12,9 @@ test('diagnostic challenge contains exactly the three planned failures', () => {
   const task = read('challenge/task.md');
   const key = read('challenge/answer-key.md');
   const failureIds = [
-    'wrong-helm-value',
     'bad-readiness-path',
     'unreachable-backend-connection',
+    'wrong-helm-value',
   ];
   assert.deepEqual([...task.matchAll(/^## Failure \d: `([^`]+)`$/gm)].map((match) => match[1]), failureIds);
   assert.deepEqual([...key.matchAll(/^## Failure \d: `([^`]+)`$/gm)].map((match) => match[1]), failureIds);
@@ -20,13 +22,24 @@ test('diagnostic challenge contains exactly the three planned failures', () => {
   assert.equal((key.match(/^## Failure /gm) || []).length, 3);
 });
 
-test('challenge requires runtime evidence before diagnosis', () => {
+test('challenge injects, observes, diagnoses, and recovers each failure before the next', () => {
   const task = read('challenge/task.md');
-  const evidenceOffset = task.indexOf('## Collect evidence before diagnosis');
-  const diagnosisOffset = task.indexOf('## Write your diagnosis');
-  assert(evidenceOffset >= 0 && diagnosisOffset > evidenceOffset);
-  for (const evidence of ['get pods', 'get events', 'get endpoints', 'describe', 'logs', 'get values', 'get manifest']) {
-    assert.match(task, new RegExp(evidence));
+  const sections = [...task.matchAll(/^## Failure \d: `([^`]+)`$/gm)];
+  for (let index = 0; index < sections.length; index += 1) {
+    const start = sections[index].index;
+    const end = sections[index + 1]?.index ?? task.length;
+    const section = task.slice(start, end);
+    const stages = ['### Inject the failure', '### Observe before diagnosis', '### Write your diagnosis', '### Recover and prove the repair'];
+    let previous = -1;
+    for (const stage of stages) {
+      const offset = section.indexOf(stage);
+      assert(offset > previous, `${sections[index][1]} must place ${stage} after the previous stage`);
+      previous = offset;
+    }
+    for (const evidence of ['get pods', 'rollout status', 'get events', 'get endpointslices', 'describe deployment', 'logs', 'get manifest']) {
+      assert.match(section, new RegExp(evidence), `${sections[index][1]} must collect ${evidence}`);
+    }
+    assert.match(section, /Do not diagnose until/i);
   }
   assert.match(task, /Do not open the answer key until/i);
 });
@@ -61,4 +74,36 @@ test('pinned recovery patch is the exact three-file candidate diff', () => {
   });
   assert.equal(patch, expected);
   assert.deepEqual([...patch.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)].map((match) => [match[1], match[2]]), paths.map((path) => [path, path]));
+});
+
+test('documented recovery preserves an attempt and unrelated work before restoring only three files', () => {
+  const candidate = '718fd28edab8a026bab114c0f21800e2df450c83';
+  const baseline = 'fdcc15c57c9879b3f15d03319ad5dd394e2706f2';
+  const paths = [
+    'section-9/chart/templates/deployment.yaml',
+    'section-9/chart/values.schema.json',
+    'section-9/chart/values.yaml',
+  ];
+  const repo = new URL('../../', import.meta.url).pathname;
+  const temporaryRoot = mkdtempSync(join(tmpdir(), 'section-9-recovery-'));
+  const clone = join(temporaryRoot, 'learner');
+  const runGit = (...args) => execFileSync('/usr/bin/git', args, {cwd: clone, encoding: 'utf8'});
+
+  try {
+    execFileSync('/usr/bin/git', ['clone', '--quiet', repo, clone]);
+    for (const path of paths) writeFileSync(join(clone, path), `\n# learner partial edit: ${path}\n`, {flag: 'a'});
+    writeFileSync(join(clone, 'section-9/request.md'), '\nLearner note outside recovery scope.\n', {flag: 'a'});
+
+    const attempt = runGit('diff', '--binary', 'HEAD', '--', ...paths);
+    writeFileSync(join(temporaryRoot, 'section-9-learner-attempt.patch'), attempt);
+    runGit('restore', '--source', baseline, '--staged', '--worktree', '--', ...paths);
+    runGit('apply', '--check', `section-9/recovery/${candidate}.patch`);
+    runGit('apply', `section-9/recovery/${candidate}.patch`);
+
+    assert.equal(runGit('diff', '--binary', baseline, '--', ...paths), read(`recovery/${candidate}.patch`));
+    assert.match(readFileSync(join(clone, 'section-9/request.md'), 'utf8'), /Learner note outside recovery scope/);
+    for (const path of paths) assert.match(attempt, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  } finally {
+    rmSync(temporaryRoot, {recursive: true, force: true});
+  }
 });

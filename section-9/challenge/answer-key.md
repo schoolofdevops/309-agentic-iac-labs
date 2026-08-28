@@ -1,48 +1,51 @@
 # Answer Key: Diagnose Three Kubernetes and Helm Failures
 
-Use this key only after you have recorded the evidence requested in
-`task.md`. A diagnosis without the evidence trail is incomplete.
+Use this key only after you have recorded the evidence requested in `task.md`.
+A diagnosis without the evidence trail is incomplete.
 
-## Failure 1: `wrong-helm-value`
+The evidence comes from cluster `agentic-iac-s9`, context
+`kind-agentic-iac-s9`, namespace inference, and release
+`inference-platform`.
 
-The API Pod and its endpoint can remain healthy, but the host curl to port
-`18080` fails. The Kind configuration maps host port `18080` to node port
-`30080`. `helm get values --all`, the Helm manifest, and `kubectl get service`
-show the wrong Helm value `30081`.
+## Failure 1: `bad-readiness-path`
 
-This failure is Helm intent, not out-of-band drift. Reset the release to the
-reviewed chart value `30080`. Then prove the Service exposes
-`8080:30080/TCP`, the endpoint is ready, and curl reaches `/readyz` through
-`127.0.0.1:18080`.
+The new API Pod is `Running` but `0/1`. Its rollout times out, and the warning
+event reports readiness HTTP 404. The Deployment description shows `/ready`,
+while the Helm manifest still renders `/readyz`.
 
-## Failure 2: `bad-readiness-path`
+The ready API EndpointSlice can still contain the old Pod during the failed
+rollout. Empty API logs do not clear the probe failure. These signals prove
+live Deployment drift, not a Helm value change.
 
-The API container is running, but the new Pod shows `0/1` in the READY column.
-The Deployment description and events report a readiness-probe HTTP failure
-for `/ready`. The application implements `/readyz`, not `/ready`.
+Restore only `/readyz`, wait for the API rollout, and prove one ready API Pod,
+a ready endpoint, and `ready HTTP 200` before continuing.
 
-The Helm manifest still renders `/readyz`. The live Deployment renders
-`/ready` because the diagnostic patch changed Kubernetes state outside Helm.
-This difference is configuration drift. The smallest repair is to reconcile
-the reviewed chart with Helm. Prove recovery with `kubectl rollout status`,
-`kubectl get pods`, and an HTTP 200 response from `/readyz`.
+## Failure 2: `unreachable-backend-connection`
 
-## Failure 3: `unreachable-backend-connection`
+The new worker Pod is `Running` but `0/1`, and its rollout times out. Events
+report readiness HTTP 503. Logs from the new worker show that
+`unreachable-backend` cannot be resolved.
 
-The worker's dependency-aware readiness fails because its live `BACKEND_URL`
-names `unreachable-backend`, which has no Service or endpoint in namespace
-`inference`. The worker Pod may be `Running` while READY remains `0/1`.
+The real dependency EndpointSlice remains ready. The Helm manifest still
+renders the `inference-platform` ConfigMap reference. The live Deployment
+instead contains the literal unreachable URL. These signals prove live worker
+drift, not a failed dependency Service.
 
-The worker logs show backend name-resolution or connection errors. `kubectl
-get endpoints` still shows the real `inference-platform-dependencies`
-endpoint. The Helm manifest also names that real Service, while the live
-Deployment does not. Reconcile the reviewed chart, then prove the worker
-rollout and logs return to the expected polling flow.
+Restore the ConfigMap reference, wait for the worker rollout, and prove one
+ready worker Pod while the dependency endpoint remains ready.
 
-## Recovery result
+## Failure 3: `wrong-helm-value`
 
-Restore the API path and the worker's ConfigMap reference before asking Helm 4
-to reconcile the release. The final exact Helm recovery is:
+The API Pod, rollout, and EndpointSlice remain healthy. The Deployment still
+uses `/readyz`, and API logs show no application failure. The broken signal is
+the host request through port `18080`.
+
+Helm values, the Helm manifest, and the live Service all show NodePort `30081`.
+Kind still maps host port `18080` to NodePort `30080`. These signals prove that
+the wrong port is Helm release intent, not live Deployment drift.
+
+Reset Helm to the reviewed values. Prove the render contains `30080`, the API
+remains ready, and `/readyz` returns HTTP 200 through `127.0.0.1:18080`.
 
 ```bash
 helm upgrade inference-platform section-9/chart --kube-context kind-agentic-iac-s9 --namespace inference --reset-values --set networkPolicy.enabled=false --force-conflicts --wait --timeout 120s
@@ -51,16 +54,19 @@ helm upgrade inference-platform section-9/chart --kube-context kind-agentic-iac-
 [ sample output ]
 
 ```text
-Release "inference-platform" has been upgraded.
+Release "inference-platform" has been upgraded. Happy Helming!
 STATUS: deployed
 ```
 
-Both `kubectl rollout status` commands must complete, all three Pods must show
-`1/1 Running`, both Services must have endpoints, and `/readyz` must return
-HTTP 200. The bounded curl retry allows the Service data path to observe the
-restored NodePort. The release is again suitable for human review of this
-disposable local run. It is not production approval.
+Use `kubectl rollout status` for the API after Helm returns.
+
+## Final result
+
+Each failure was recovered before the next injection. The final release has
+three ready Pods, the original ready endpoints, NodePort `30080`, and a working
+host request. This is suitable for human review of the disposable local run.
+It is not production approval.
 
 NetworkPolicy remains disabled. The challenge proves probe, dependency, Helm
-value, and reconciliation behaviour on the exact `agentic-iac-s9` cluster. It
-does not prove NetworkPolicy enforcement.
+value, and reconciliation behaviour on `agentic-iac-s9`. It does not prove
+NetworkPolicy enforcement.
