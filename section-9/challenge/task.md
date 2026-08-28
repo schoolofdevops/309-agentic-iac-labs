@@ -244,14 +244,14 @@ inference-platform-worker-...             0/1     Running   0
 Read the worker warning event.
 
 ```bash
-command kubectl --context kind-agentic-iac-s9 --namespace inference get events --field-selector type=Warning --sort-by=.metadata.creationTimestamp | command grep -E 'inference-platform-worker|LAST SEEN'
+command kubectl --context kind-agentic-iac-s9 --namespace inference get events --field-selector type=Warning --sort-by=.metadata.creationTimestamp | command awk 'NR==1 || (/inference-platform-worker/ && /statuscode: 503/)'
 ```
 
 [ sample output ]
 
 ```text
-LAST SEEN   TYPE      REASON      OBJECT                                  MESSAGE
-2s          Warning   Unhealthy   pod/inference-platform-worker-...       Readiness probe failed: HTTP probe failed with statuscode: 503
+LAST SEEN   TYPE      REASON      OBJECT                                           MESSAGE
+2s          Warning   Unhealthy   pod/inference-platform-worker-5ddd46c654-sp6j7   Readiness probe failed: HTTP probe failed with statuscode: 503
 ```
 
 Check the real dependency endpoint. It remains ready, which rules out a failed

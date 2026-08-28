@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {execFileSync} from 'node:child_process';
+import {execFileSync, spawnSync} from 'node:child_process';
 import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -65,8 +65,9 @@ test('challenge uses portable evidence filters and exact one-line NodePort outpu
   assert.doesNotMatch(task, /\b(?:command\s+)?rg\b/);
   assert.match(task, /\| command awk 'NR==1 \|\| \(\/inference-platform-api\/ && \/statuscode: 404\/\)'/);
   assert.doesNotMatch(task, /grep -E 'inference-platform-api\|LAST SEEN'/);
+  assert.match(task, /\| command awk 'NR==1 \|\| \(\/inference-platform-worker\/ && \/statuscode: 503\/\)'/);
+  assert.doesNotMatch(task, /grep -E 'inference-platform-worker\|LAST SEEN'/);
   assert.match(task, /\| command grep 'path: \/readyz'/);
-  assert.match(task, /\| command grep -E 'inference-platform-worker\|LAST SEEN'/);
   assert.match(task, /yq 'select\(\.kind == "Deployment" and \.metadata\.name == "inference-platform-worker"\)[^']+select\(\.name == "BACKEND_URL"\)'/);
   assert.doesNotMatch(task, /awk '\/name: BACKEND_URL/);
   assert.match(task, /```text\n\{\n  "name": "BACKEND_URL",[\s\S]*?"key": "BACKEND_URL"[\s\S]*?\n\}\n```/);
@@ -75,6 +76,25 @@ test('challenge uses portable evidence filters and exact one-line NodePort outpu
   assert.equal((task.match(nodePortCommand) || []).length, 3);
   assert.equal((task.match(/```text\nnodePort: 30081\n```/g) || []).length, 2);
   assert.equal((task.match(/```text\nnodePort: 30080\n```/g) || []).length, 1);
+});
+
+test('worker event filter keeps the header and only the current worker HTTP 503', () => {
+  const events = [
+    'LAST SEEN   TYPE      REASON      OBJECT                                      MESSAGE',
+    '8m          Warning   Unhealthy   pod/inference-platform-worker-old           Readiness probe failed: context deadline exceeded',
+    '2s          Warning   Unhealthy   pod/inference-platform-api-current          Readiness probe failed: HTTP probe failed with statuscode: 503',
+    '1s          Warning   Unhealthy   pod/inference-platform-worker-current       Readiness probe failed: HTTP probe failed with statuscode: 503',
+    '',
+  ].join('\n');
+  const result = spawnSync('/usr/bin/awk', [
+    'NR==1 || (/inference-platform-worker/ && /statuscode: 503/)',
+  ], {input: events, encoding: 'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, [
+    'LAST SEEN   TYPE      REASON      OBJECT                                      MESSAGE',
+    '1s          Warning   Unhealthy   pod/inference-platform-worker-current       Readiness probe failed: HTTP probe failed with statuscode: 503',
+    '',
+  ].join('\n'));
 });
 
 test('pinned recovery patch is the exact three-file candidate diff', () => {
