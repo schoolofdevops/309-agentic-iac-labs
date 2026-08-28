@@ -1,0 +1,15 @@
+{
+  "schema": "agentic-iac-section-9-protected-manifest/v1",
+  "protected_files": {
+    "labs/m9/evaluator-scope.json": "641e684604e6062e45ab9bf3a73b1c9603d24644f7ae8a4ff59a94da76fbe03b",
+    "section-9/README.md": "e7447d6003fe64b507d2d8a8f5d371439e4b70debed941cc64d63e509537e1a8",
+    "section-9/challenge/README.md": "b5bce8b14b03a5ab6f8380195bf56885acd89523d9bb11d33b3285136d201d51",
+    "section-9/request.md": "42328535d68626d76c2d4c684e01ba8e055b1841c8c7a0e6ce1e04ca7f27b131",
+    "section-9/scripts/check-package.mjs": "e19cdeccbe23770cdab7c88e95b07c0ce4d1fb0e0711652dcd2c9b1eff7a06d2",
+    "section-9/scripts/cleanup-kind.mjs": "45c47a78f8f0395a3805340e20faaab865d2169e6ad25642a318040ffdba0906",
+    "section-9/task.md": "f8f9a36faf93a4dd42bc5d507b424cbf4e027d3f5d68d0fb712b8c87a63e0470",
+    "section-9/tests/chart-contract.test.mjs": "7ce9f712891682a47aceef4e3646174e8e323a23ae3b13673d68eb346be37ae8",
+    "section-9/tests/lifecycle-negative-paths.test.mjs": "02796ea1a62adf7c8244cc9c6de9fc351098dac114c845b81c6b33cce552c94c",
+    "section-9/tests/workload-contract.test.mjs": "b71fa2276e22e7f5ecfd4c2c086fd207092936552805ed094fcf6000e9be5f31"
+  }
+}

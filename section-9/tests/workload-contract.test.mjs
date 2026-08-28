@@ -28,6 +28,11 @@ test('publishes one bounded Section 9 repair request', () => {
   assert.match(taskContract, /chart\/templates\/deployment\.yaml/i);
   assert.match(taskContract, /exactly two primary findings/i);
   assert.match(taskContract, /No Kind cluster, Kubernetes namespace, Helm release, image, apply, or destroy action/i);
+  const readme = read('README.md');
+  assert.match(readme, /node labs\/m9\/check-section-9\.mjs section-9/);
+  assert.doesNotMatch(readme, /node section-9\/scripts\/check-package\.mjs section-9/);
+  assert.match(readme, /external launcher.*Git.*human review/is);
+  assert.match(readme, /not.*self-attestation/is);
 });
 
 test('freezes the split workload role and API contracts', () => {
@@ -92,4 +97,6 @@ test('the evaluator is plan-free and uses fixed non-shell commands', () => {
   ]) assert.ok(evaluator.includes(fixed), `missing fixed arguments ${fixed}`);
   assert.doesNotMatch(evaluator, /\b(terraform|tofu|kubectl|docker)\b/);
   assert.doesNotMatch(evaluator, /\b(apply|destroy)\b/);
+  assert.match(evaluator, /S9_TRUSTED_SCOPE_PATH/);
+  assert.match(evaluator, /trusted launcher/i);
 });

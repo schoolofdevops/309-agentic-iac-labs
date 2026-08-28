@@ -9,34 +9,6 @@ const CHECK_RESOURCE_LIMITS = true;
 const CHECK_SECRET_MATERIAL = true;
 const RUN_SCHEMA_CHECKS = true;
 
-const EVALUATED_FILES = Object.freeze([
-  'app/.dockerignore',
-  'app/Dockerfile',
-  'app/api.go',
-  'app/backend.go',
-  'app/go.mod',
-  'app/main.go',
-  'app/main_test.go',
-  'app/worker.go',
-  'chart/Chart.yaml',
-  'chart/templates/_helpers.tpl',
-  'chart/templates/configmap.yaml',
-  'chart/templates/deployment.yaml',
-  'chart/templates/networkpolicy.yaml',
-  'chart/templates/service.yaml',
-  'chart/templates/serviceaccount.yaml',
-  'chart/values.schema.json',
-  'chart/values.yaml',
-  'policy/workload.rego',
-]);
-const LEARNER_OWNED_FILES = Object.freeze([
-  'chart/templates/deployment.yaml',
-  'chart/values.schema.json',
-  'chart/values.yaml',
-]);
-const READ_ONLY_FILES = Object.freeze(EVALUATED_FILES.filter((file) => !LEARNER_OWNED_FILES.includes(file)));
-const EXPECTED_READ_ONLY_SHA256 = '940959a436aa01fcfc78f10d8d6b0225f4efa1896aa1367f12a49a3d6dcd01e5';
-
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const status = (pass, detail) => ({status: pass ? 'PASS' : 'FAIL', detail});
 let createdOutput = null;
@@ -85,12 +57,59 @@ function collectMessages(value, messages = []) {
   return messages;
 }
 
+function scanSecretSource(file, text) {
+  const findings = [];
+  const sensitiveKey = /(?:^|[._/-])(?:token|secret|password|credential|api[_-]?key|access[_-]?key|private[_-]?key)(?:$|[._/-])/i;
+  const secretShapedLiteral = /(?:token|secret|password|credential|private[_-]?key)[_-](?:value|material|literal|committed|unsafe)(?:[^\s"']*)?/i;
+  for (const [index, rawLine] of text.split('\n').entries()) {
+    const line = rawLine.trim().replace(/^#\s*/, '');
+    if (!line) continue;
+    const assignment = line.match(/^(?:-\s*)?["']?([^:=]+?)["']?\s*[:=]\s*(.+?)\s*,?$/);
+    if (assignment) {
+      const key = assignment[1].trim();
+      const value = assignment[2].trim();
+      const structural = value === '' || /^(?:null|true|false|\{|\[)/i.test(value);
+      const externalReference = /existingSecret|secretKeyRef|configMapKeyRef/.test(value);
+      if (sensitiveKey.test(key) && !structural && (!externalReference || /b64enc|stringData|data/.test(value))) {
+        findings.push({file, line: index + 1, kind: 'secret-shaped-assignment'});
+      }
+    }
+    if (secretShapedLiteral.test(line)) findings.push({file, line: index + 1, kind: 'secret-shaped-literal'});
+  }
+  return findings.filter((finding, index, all) => all.findIndex((candidate) => (
+    candidate.file === finding.file && candidate.line === finding.line && candidate.kind === finding.kind
+  )) === index);
+}
+
 async function main() {
   if (process.argv.length !== 4) throw new Error('provide exactly the Section 9 source and one evidence output directory');
   const sourceArgument = process.argv[2];
   const outputArgument = process.argv[3];
   const source = resolve(sourceArgument);
   const output = resolve(outputArgument);
+
+  if (process.env.S9_TRUSTED_LAUNCHER !== 'labs/m9/check-section-9.mjs'
+    || !/^[a-f0-9]{64}$/.test(process.env.S9_TRUSTED_MANIFEST_SHA256 || '')
+    || !/^[a-f0-9]{64}$/.test(process.env.S9_TRUSTED_SCOPE_SHA256 || '')
+    || !process.env.S9_TRUSTED_SCOPE_PATH) {
+    throw new Error('use the trusted launcher labs/m9/check-section-9.mjs');
+  }
+  const scopePath = resolve(process.env.S9_TRUSTED_SCOPE_PATH);
+  const scopeStat = await lstat(scopePath);
+  if (scopeStat.isSymbolicLink() || !scopeStat.isFile()) throw new Error('trusted evaluator scope must be a regular file, not a symbolic link');
+  const scopeBytes = await readFile(scopePath);
+  if (sha256(scopeBytes) !== process.env.S9_TRUSTED_SCOPE_SHA256) throw new Error('trusted evaluator scope hash changed after launch');
+  const scope = JSON.parse(scopeBytes);
+  if (scope.schema !== 'agentic-iac-section-9-scope/v1'
+    || !Array.isArray(scope.evaluated_files)
+    || !Array.isArray(scope.learner_owned_files)
+    || !scope.expected_read_only_sha256
+    || !scope.exact_resources) {
+    throw new Error('trusted evaluator scope is invalid');
+  }
+  const evaluatedFiles = Object.freeze([...scope.evaluated_files]);
+  const learnerOwnedFiles = Object.freeze([...scope.learner_owned_files]);
+  const readOnlyFiles = Object.freeze(evaluatedFiles.filter((file) => !learnerOwnedFiles.includes(file)));
 
   if (basename(source) !== 'section-9') throw new Error('source must be a Section 9 directory named section-9');
   const sourceStat = await lstat(sourceArgument);
@@ -102,7 +121,7 @@ async function main() {
     ...await filesBelow(resolve(source, 'chart'), 'chart'),
     ...await filesBelow(resolve(source, 'policy'), 'policy'),
   ].sort();
-  if (JSON.stringify(actualFiles) !== JSON.stringify([...EVALUATED_FILES].sort())) {
+  if (JSON.stringify(actualFiles) !== JSON.stringify([...evaluatedFiles].sort())) {
     throw new Error('evaluated source scope changed: expected the fixed app, chart, and policy files');
   }
 
@@ -204,7 +223,9 @@ async function main() {
 
   const conftest = run('conftest', 'conftest', ['test', '-', '-p', resolve(source, 'policy'), '--output', 'json'], source, render.stdout);
 
-  const valuesText = await readFile(resolve(source, 'chart/values.yaml'), 'utf8');
+  const parsedValues = run('parse-values', 'yq', ['.', resolve(source, 'chart/values.yaml')], source);
+  if (parsedValues.exit !== 0) throw new Error(`values normalization failed with exit ${parsedValues.exit}`);
+  const values = JSON.parse(parsedValues.stdout);
   const schema = JSON.parse(await readFile(resolve(source, 'chart/values.schema.json'), 'utf8'));
   const deployments = objects.filter(({kind}) => kind === 'Deployment');
   const services = objects.filter(({kind}) => kind === 'Service');
@@ -272,13 +293,59 @@ async function main() {
     internalRecord('schema-worker-limits', ['internal:schema-contract', 'resources.worker.limits', 'backend.existingSecret'], schemaChecksPass ? 0 : 1, `${backendSchemaPass}:${workerSchemaPass}:${fixedSchemaNegativesPass}`);
   }
 
-  const literalTokenLine = /^\s*(?:token|password|secret|api[_-]?key|access[_-]?key|private[_-]?key):\s*(?!(?:''|""|null)\s*$)\S+/im.test(valuesText);
-  const secretMaterialFound = CHECK_SECRET_MATERIAL && (literalTokenLine || renderedSecrets.length > 0 || !backendSchemaPass);
-  internalRecord('secret-scan', ['internal:secret-scan', 'chart/values.yaml', 'rendered-manifests'], secretMaterialFound ? 1 : 0, `${literalTokenLine}:${renderedSecrets.length}:${backendSchemaPass}`);
+  const learnerChartSources = learnerOwnedFiles.filter((file) => file.startsWith('chart/') && /\.(?:yaml|yml|json|tpl)$/.test(file));
+  const secretSourceFindings = [];
+  for (const file of learnerChartSources) {
+    secretSourceFindings.push(...scanSecretSource(file, await readFile(resolve(source, file), 'utf8')));
+  }
+  const renderedSecretData = renderedSecrets.some((secret) => (
+    Object.keys(secret.data || {}).length > 0 || Object.keys(secret.stringData || {}).length > 0
+  ));
+  const secretMaterialFound = CHECK_SECRET_MATERIAL
+    && (secretSourceFindings.length > 0 || renderedSecrets.length > 0 || renderedSecretData || !backendSchemaPass);
+  internalRecord(
+    'secret-scan',
+    ['internal:secret-scan', ...learnerChartSources, 'rendered-manifests'],
+    secretMaterialFound ? 1 : 0,
+    `${secretSourceFindings.length}:${renderedSecrets.length}:${renderedSecretData}:${backendSchemaPass}`,
+  );
 
+  const resourceDifferences = [];
+  const canonical = (value) => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+    return value;
+  };
+  const sameResource = (actual, expected) => JSON.stringify(canonical(actual)) === JSON.stringify(canonical(expected));
+  for (const role of roles) {
+    if (!sameResource(values.resources?.[role], scope.exact_resources[role])) resourceDifferences.push({role, source: 'values'});
+    if (!sameResource(containerFor(role)?.resources, scope.exact_resources[role])) resourceDifferences.push({role, source: 'render'});
+  }
   const worker = containerFor('worker');
-  const missingWorkerLimits = CHECK_RESOURCE_LIMITS && (!worker?.resources?.limits?.cpu || !worker?.resources?.limits?.memory || !workerSchemaPass);
-  internalRecord('resource-limits', ['internal:resource-check', 'Deployment/inference-platform-worker'], missingWorkerLimits ? 1 : 0, `${Boolean(worker?.resources?.limits?.cpu)}:${Boolean(worker?.resources?.limits?.memory)}:${workerSchemaPass}`);
+  const missingWorkerLimits = CHECK_RESOURCE_LIMITS && (
+    !values.resources?.worker?.limits?.cpu
+    || !values.resources?.worker?.limits?.memory
+    || !worker?.resources?.limits?.cpu
+    || !worker?.resources?.limits?.memory
+    || !workerSchemaPass
+  );
+  const isOnlyMissingWorkerLimits = ({role, source: resourceSource}) => {
+    if (role !== 'worker') return false;
+    const actual = resourceSource === 'values' ? values.resources?.worker : worker?.resources;
+    return sameResource(actual?.requests, scope.exact_resources.worker.requests)
+      && (!actual?.limits?.cpu || !actual?.limits?.memory);
+  };
+  const incorrectResourceQuantities = CHECK_RESOURCE_LIMITS
+    && resourceDifferences.some((difference) => !isOnlyMissingWorkerLimits(difference));
+  const exactResourcesPass = CHECK_RESOURCE_LIMITS
+    && resourceDifferences.length === 0
+    && workerSchemaPass;
+  internalRecord(
+    'resource-limits',
+    ['internal:resource-check', 'values.resources', 'rendered Deployments', '10m', '32Mi', '100m', '64Mi'],
+    exactResourcesPass ? 0 : 1,
+    JSON.stringify(resourceDifferences),
+  );
 
   let conftestMessages = [];
   try {
@@ -291,8 +358,8 @@ async function main() {
       || /inference-platform-worker\/worker requires a CPU limit/i.test(message)
       || /inference-platform-worker\/worker requires a memory limit/i.test(message)
   ));
-  const readOnlySha256 = await scopedHash(source, READ_ONLY_FILES);
-  const allowedSourceScopePass = readOnlySha256 === EXPECTED_READ_ONLY_SHA256;
+  const readOnlySha256 = await scopedHash(source, readOnlyFiles);
+  const allowedSourceScopePass = readOnlySha256 === scope.expected_read_only_sha256;
 
   const gates = {
     app_tests: status(appTests.exit === 0, `go test exit ${appTests.exit}`),
@@ -301,7 +368,7 @@ async function main() {
     schema: status(schemaChecksPass, `fixed negatives ${fixedSchemaNegativesPass}; external Secret schema ${Boolean(backendSchemaPass)}; worker limits schema ${workerSchemaPass}`),
     kubeconform: status(kubeconform.exit === 0, `exit ${kubeconform.exit}`),
     secret_scan: status(!secretMaterialFound, secretMaterialFound ? 'literal or rendered token material detected; value withheld' : 'no literal or rendered token material'),
-    resource_limits: status(!missingWorkerLimits, missingWorkerLimits ? 'worker CPU or memory limits missing' : 'worker requests and limits present'),
+    resource_limits: status(exactResourcesPass, exactResourcesPass ? 'all roles use exact 10m/32Mi requests and 100m/64Mi limits in values and render' : 'one or more source or rendered resource quantities differ'),
     conftest: status(conftest.exit === 0, `exit ${conftest.exit}; ${conftestMessages.length} policy messages`),
     workload_contract: status(workloadContractPass, 'three Deployments, two Services, one ConfigMap, and three ServiceAccounts'),
     security_context: status(securityContextPass, 'non-root, seccomp, read-only root, dropped capabilities, and separate service accounts'),
@@ -316,8 +383,9 @@ async function main() {
     title: 'Committed backend token material',
     evidence: 'A token-shaped value is committed and/or rendered; the value is intentionally withheld.',
     consequences: [
-      ...(literalTokenLine ? ['chart values contain token-shaped material'] : []),
+      ...(secretSourceFindings.length ? [`${secretSourceFindings.length} secret-shaped source assignments or literals found; values withheld`] : []),
       ...(renderedSecrets.length ? ['the chart renders a Kubernetes Secret instead of referencing an existing Secret'] : []),
+      ...(renderedSecretData ? ['a rendered Secret contains data or stringData'] : []),
       ...(!backendSchemaPass ? ['the values schema admits the inline token path instead of requiring an existing Secret reference'] : []),
     ],
   });
@@ -330,6 +398,12 @@ async function main() {
       ...(!worker?.resources?.limits?.memory ? ['worker memory limit is absent'] : []),
       ...(!workerSchemaPass ? ['the values schema permits the worker limits to be omitted'] : []),
     ],
+  });
+  if (incorrectResourceQuantities) primaryFindings.push({
+    id: 'incorrect-resource-quantities',
+    title: 'Incorrect workload resource quantities',
+    evidence: 'At least one role differs from the exact source or rendered resource contract.',
+    consequences: resourceDifferences.map(({role, source: resourceSource}) => `${role} ${resourceSource} resources differ from the pinned contract`),
   });
   if (!allowedSourceScopePass) primaryFindings.push({
     id: 'changed-read-only-source',
@@ -360,21 +434,35 @@ async function main() {
     schema: 'agentic-iac-section-9-evidence/v1',
     started,
     completed,
-    source_sha256: await scopedHash(source, EVALUATED_FILES),
+    source_sha256: await scopedHash(source, evaluatedFiles),
     evaluator_sha256: sha256(await readFile(new URL(import.meta.url))),
     artifacts: {
-      app_sha256: await scopedHash(source, EVALUATED_FILES.filter((file) => file.startsWith('app/'))),
-      chart_sha256: await scopedHash(source, EVALUATED_FILES.filter((file) => file.startsWith('chart/'))),
-      policy_sha256: await scopedHash(source, EVALUATED_FILES.filter((file) => file.startsWith('policy/'))),
+      app_sha256: await scopedHash(source, evaluatedFiles.filter((file) => file.startsWith('app/'))),
+      chart_sha256: await scopedHash(source, evaluatedFiles.filter((file) => file.startsWith('chart/'))),
+      policy_sha256: await scopedHash(source, evaluatedFiles.filter((file) => file.startsWith('policy/'))),
       read_only_sha256: readOnlySha256,
       render_sha256: sha256(render.stdout),
     },
-    evaluated_files: EVALUATED_FILES,
-    learner_owned_files: LEARNER_OWNED_FILES,
+    evaluated_files: evaluatedFiles,
+    learner_owned_files: learnerOwnedFiles,
+    trust_boundary: {
+      kind: 'external-author-launcher-plus-git-and-human-review',
+      launcher: process.env.S9_TRUSTED_LAUNCHER,
+      manifest_sha256: process.env.S9_TRUSTED_MANIFEST_SHA256,
+      scope_sha256: process.env.S9_TRUSTED_SCOPE_SHA256,
+      cryptographic_self_attestation: false,
+      statement: 'The external labs/m9 launcher, repository scope, Git review, and human approval protect evaluator integrity; the evaluator does not attest to itself.',
+    },
     tool_versions: toolVersions,
     decision,
     gates,
     primary_findings: primaryFindings,
+    observations: {
+      secret_source_findings: secretSourceFindings,
+      rendered_secret_objects: renderedSecrets.length,
+      rendered_secret_data: renderedSecretData,
+      resource_differences: resourceDifferences,
+    },
     commands,
     proof_limits: [
       'This evaluator does not create a Kind cluster, namespace, release, image, or workload.',

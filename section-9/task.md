@@ -18,6 +18,11 @@ Preserve all role, API, authentication, probe, service-account, security,
 service, label, and policy contracts. Do not edit the evaluator or policy to
 make a finding disappear.
 
+Run the check through `node labs/m9/check-section-9.mjs section-9 <output>`. Do not
+invoke `section-9/scripts/check-package.mjs` directly. The external launcher,
+Git review, and human approval protect evaluator scope; the mechanism is not
+cryptographic self-attestation.
+
 This task is static and plan-free. No Kind cluster, Kubernetes namespace, Helm release, image, apply, or destroy action is permitted.
 Evaluator acceptance means ready for human review; it is not deployment
 approval.

@@ -1,0 +1,43 @@
+{
+  "schema": "agentic-iac-section-9-scope/v1",
+  "evaluated_files": [
+    "app/.dockerignore",
+    "app/Dockerfile",
+    "app/api.go",
+    "app/backend.go",
+    "app/go.mod",
+    "app/main.go",
+    "app/main_test.go",
+    "app/worker.go",
+    "chart/Chart.yaml",
+    "chart/templates/_helpers.tpl",
+    "chart/templates/configmap.yaml",
+    "chart/templates/deployment.yaml",
+    "chart/templates/networkpolicy.yaml",
+    "chart/templates/service.yaml",
+    "chart/templates/serviceaccount.yaml",
+    "chart/values.schema.json",
+    "chart/values.yaml",
+    "policy/workload.rego"
+  ],
+  "learner_owned_files": [
+    "chart/templates/deployment.yaml",
+    "chart/values.schema.json",
+    "chart/values.yaml"
+  ],
+  "expected_read_only_sha256": "940959a436aa01fcfc78f10d8d6b0225f4efa1896aa1367f12a49a3d6dcd01e5",
+  "exact_resources": {
+    "dependencies": {
+      "requests": {"cpu": "10m", "memory": "32Mi"},
+      "limits": {"cpu": "100m", "memory": "64Mi"}
+    },
+    "api": {
+      "requests": {"cpu": "10m", "memory": "32Mi"},
+      "limits": {"cpu": "100m", "memory": "64Mi"}
+    },
+    "worker": {
+      "requests": {"cpu": "10m", "memory": "32Mi"},
+      "limits": {"cpu": "100m", "memory": "64Mi"}
+    }
+  }
+}

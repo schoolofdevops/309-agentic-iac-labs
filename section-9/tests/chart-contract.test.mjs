@@ -6,7 +6,7 @@ import {spawnSync} from 'node:child_process';
 import test from 'node:test';
 
 const section = resolve(import.meta.dirname, '..');
-const runner = resolve(section, 'scripts/check-package.mjs');
+const runner = resolve(section, '../labs/m9/check-section-9.mjs');
 const read = (path) => readFile(resolve(section, path), 'utf8');
 
 test('starter chart contains only the two approved defect families', async () => {
@@ -25,6 +25,9 @@ test('starter chart contains only the two approved defect families', async () =>
   const worker = schema.properties.resources.properties.worker;
   assert.deepEqual(worker.required, ['requests']);
   assert.equal(worker.properties.limits, undefined);
+  for (const role of ['dependencies', 'api']) {
+    assert.match(values, new RegExp(`${role}:[\\s\\S]*?requests:[\\s\\S]*?cpu: 10m[\\s\\S]*?memory: 32Mi[\\s\\S]*?limits:[\\s\\S]*?cpu: 100m[\\s\\S]*?memory: 64Mi`));
+  }
 
   for (const required of [
     'automountServiceAccountToken: false',

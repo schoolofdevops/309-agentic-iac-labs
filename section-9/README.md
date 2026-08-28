@@ -13,16 +13,23 @@ lifecycle after the package has been repaired and reviewed.
 Run the author tests from the repository root:
 
 ```console
-node --test --test-concurrency=1 section-9/tests/*.test.mjs
+node --test --test-concurrency=1 labs/m9/tests/*.test.mjs section-9/tests/*.test.mjs
 ```
 
-Run the independent evaluator with a new, explicitly named directory below
-your operating system temporary directory:
+Enter the independent evaluator through the author-controlled launcher with a
+new, explicitly named directory below your operating system temporary
+directory:
 
 ```console
-node section-9/scripts/check-package.mjs section-9 \
+node labs/m9/check-section-9.mjs section-9 \
   "${TMPDIR:-/tmp}/agentic-iac-section-9-starter"
 ```
 
 The evaluator records hashes and bounded command evidence. It does not retain
 the rendered Secret or its value.
+
+The external launcher, its protected manifest, the repository's Git scope, and
+human review form the evaluator trust boundary. This is not cryptographic
+self-attestation: changing the launcher or protected manifest itself still
+requires Git and human review. The launcher fails before evaluation when a
+protected evaluator, scope, request, task, test, or documentation hash changes.

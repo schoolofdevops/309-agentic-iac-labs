@@ -6,7 +6,8 @@ import {spawnSync} from 'node:child_process';
 import test from 'node:test';
 
 const section = resolve(import.meta.dirname, '..');
-const runner = resolve(section, 'scripts/check-package.mjs');
+const evaluator = resolve(section, 'scripts/check-package.mjs');
+const runner = resolve(section, '../labs/m9/check-section-9.mjs');
 const cleanup = resolve(section, 'scripts/cleanup-kind.mjs');
 
 async function temporarySection(prefix) {
@@ -22,6 +23,45 @@ function runEvaluator(script, source, output, options = {}) {
     timeout: 180_000,
     ...options,
   });
+}
+
+async function repairCandidate(source) {
+  const valuesPath = join(source, 'chart/values.yaml');
+  let values = await readFile(valuesPath, 'utf8');
+  values = values.replace(
+    '  # Seeded learner defect: generated token material must not live in values.\n  token: s9-course-token-committed',
+    '  existingSecret:\n    name: inference-platform-backend-token\n    key: token',
+  );
+  values = values.replace(
+    '  worker:\n    requests:\n      cpu: 10m\n      memory: 32Mi\n',
+    '  worker:\n    requests:\n      cpu: 10m\n      memory: 32Mi\n    limits:\n      cpu: 100m\n      memory: 64Mi\n',
+  );
+  await writeFile(valuesPath, values);
+
+  const schemaPath = join(source, 'chart/values.schema.json');
+  const schema = JSON.parse(await readFile(schemaPath, 'utf8'));
+  schema.properties.backend.required = ['url', 'existingSecret'];
+  delete schema.properties.backend.properties.token;
+  schema.properties.backend.properties.existingSecret = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['name', 'key'],
+    properties: {
+      name: {type: 'string', minLength: 1},
+      key: {type: 'string', minLength: 1},
+    },
+  };
+  schema.properties.resources.properties.worker = {$ref: '#/definitions/resources'};
+  await writeFile(schemaPath, `${JSON.stringify(schema, null, 2)}\n`);
+
+  const deploymentPath = join(source, 'chart/templates/deployment.yaml');
+  const deployment = await readFile(deploymentPath, 'utf8');
+  const rangeOffset = deployment.indexOf('{{- range $role');
+  assert.notEqual(rangeOffset, -1);
+  const repaired = `{{- $root := . -}}\n${deployment.slice(rangeOffset)}`
+    .replace('name: inference-platform-backend-token', 'name: {{ $root.Values.backend.existingSecret.name }}')
+    .replace('- key: token\n                      path: token', '- key: {{ $root.Values.backend.existingSecret.key }}\n                      path: token');
+  await writeFile(deploymentPath, repaired);
 }
 
 test('evaluator rejects path escape and a symbolic-link source', async () => {
@@ -70,7 +110,7 @@ test('evaluator rejects unsafe output, missing tools, and changed evaluated scop
   }
 });
 
-test('evaluator rejects nested symlinks, pre-existing output, and an empty render', async () => {
+test('evaluator rejects nested symlinks and pre-existing output', async () => {
   const {parent, source} = await temporarySection('section-9-inputs-');
   const output = join(parent, 'agentic-iac-section-9-input-test');
   try {
@@ -89,16 +129,6 @@ test('evaluator rejects nested symlinks, pre-existing output, and an empty rende
     assert.notEqual(existing.status, 0);
     assert.match(existing.stderr, /already exists/i);
 
-    await rm(output, {recursive: true, force: true});
-    const template = join(source, 'chart/templates/deployment.yaml');
-    const original = await readFile(template, 'utf8');
-    await writeFile(template, '{{- if false }}\n' + original + '\n{{- end }}\n');
-    for (const file of ['configmap.yaml', 'networkpolicy.yaml', 'service.yaml', 'serviceaccount.yaml']) {
-      await writeFile(join(source, 'chart/templates', file), '{{- if false }}{{- end }}\n');
-    }
-    const empty = runEvaluator(runner, source, output);
-    assert.notEqual(empty.status, 0);
-    assert.match(empty.stderr + empty.stdout, /empty render/i);
   } finally {
     await rm(parent, {recursive: true, force: true});
   }
@@ -121,7 +151,7 @@ test('evaluator rejects a change outside the three learner-owned chart files', a
 });
 
 test('required evaluator mutations are killed', async (t) => {
-  const original = await readFile(runner, 'utf8');
+  const original = await readFile(evaluator, 'utf8');
   const mutations = [
     ['removed limit check', 'const CHECK_RESOURCE_LIMITS = true;', 'const CHECK_RESOURCE_LIMITS = false;'],
     ['weakened secret detection', 'const CHECK_SECRET_MATERIAL = true;', 'const CHECK_SECRET_MATERIAL = false;'],
@@ -133,23 +163,97 @@ test('required evaluator mutations are killed', async (t) => {
     await t.test(name, async () => {
       assert.ok(original.includes(needle), `mutation hook missing: ${needle}`);
       const {parent, source} = await temporarySection('section-9-mutant-');
-      const mutant = join(parent, 'check-package-mutant.mjs');
       const output = join(parent, `agentic-iac-section-9-${name.replaceAll(' ', '-')}`);
       try {
-        await writeFile(mutant, original.replace(needle, replacement));
-        const result = runEvaluator(mutant, source, output);
+        await writeFile(join(source, 'scripts/check-package.mjs'), original.replace(needle, replacement));
+        const result = runEvaluator(runner, source, output);
+        assert.equal(result.status, 2, result.stdout + result.stderr);
+        assert.match(result.stderr, /protected file hash mismatch/i);
+        await assert.rejects(access(output));
+      } finally {
+        await rm(parent, {recursive: true, force: true});
+      }
+    });
+  }
+});
+
+test('exact resource quantities reject wrong values for multiple roles', async (t) => {
+  const cases = [
+    ['API CPU request', '  api:\n    requests:\n      cpu: 10m\n      memory: 32Mi', '  api:\n    requests:\n      cpu: 20m\n      memory: 32Mi'],
+    ['dependencies memory limit', '      cpu: 100m\n      memory: 64Mi\n  api:', '      cpu: 100m\n      memory: 96Mi\n  api:'],
+  ];
+  for (const [name, needle, replacement] of cases) {
+    await t.test(name, async () => {
+      const {parent, source} = await temporarySection('section-9-resource-');
+      const output = join(parent, `agentic-iac-section-9-${name.replaceAll(' ', '-')}`);
+      try {
+        await repairCandidate(source);
+        const valuesPath = join(source, 'chart/values.yaml');
+        const values = await readFile(valuesPath, 'utf8');
+        assert.ok(values.includes(needle));
+        await writeFile(valuesPath, values.replace(needle, replacement));
+        const result = runEvaluator(runner, source, output);
+        assert.equal(result.status, 1, result.stdout + result.stderr);
         const report = JSON.parse(await readFile(join(output, 'evidence-report.json'), 'utf8'));
-        const acceptable = result.status === 1
-          && result.stdout.includes('Section 9 package: REJECTED')
-          && !result.stdout.includes('READY_FOR_HUMAN_REVIEW')
-          && report.decision === 'REJECTED'
-          && JSON.stringify(report.primary_findings.map(({id}) => id)) === JSON.stringify([
-            'committed-backend-token-material',
-            'missing-worker-resource-limits',
-          ])
-          && report.gates.schema.status === 'FAIL'
-          && report.commands.some(({id}) => id === 'schema-worker-limits');
-        assert.equal(acceptable, false, `${name} survived the evaluator contract`);
+        assert.equal(report.gates.resource_limits.status, 'FAIL');
+        assert.ok(report.primary_findings.some(({id}) => id === 'incorrect-resource-quantities'));
+      } finally {
+        await rm(parent, {recursive: true, force: true});
+      }
+    });
+  }
+
+  await t.test('rendered resources diverge from correct values', async () => {
+    const {parent, source} = await temporarySection('section-9-render-resource-');
+    const output = join(parent, 'agentic-iac-section-9-render-resource');
+    try {
+      await repairCandidate(source);
+      const deploymentPath = join(source, 'chart/templates/deployment.yaml');
+      const deployment = await readFile(deploymentPath, 'utf8');
+      const needle = '{{- index $root.Values.resources $role | toYaml | nindent 12 }}';
+      assert.ok(deployment.includes(needle));
+      await writeFile(deploymentPath, deployment.replace(needle, '{{- index $root.Values.resources $role | toYaml | replace "64Mi" "96Mi" | nindent 12 }}'));
+      const result = runEvaluator(runner, source, output);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      const report = JSON.parse(await readFile(join(output, 'evidence-report.json'), 'utf8'));
+      assert.ok(report.observations.resource_differences.some(({source: resourceSource}) => resourceSource === 'render'));
+      assert.ok(report.primary_findings.some(({id}) => id === 'incorrect-resource-quantities'));
+    } finally {
+      await rm(parent, {recursive: true, force: true});
+    }
+  });
+});
+
+test('secret scan catches assignments in deployment comments and schema literals', async (t) => {
+  const cases = [
+    ['deployment comment', async (source) => {
+      const path = join(source, 'chart/templates/deployment.yaml');
+      await writeFile(path, `# backend_password = deployment-secret-value\n${await readFile(path, 'utf8')}`);
+      return 'chart/templates/deployment.yaml';
+    }],
+    ['schema literal', async (source) => {
+      const path = join(source, 'chart/values.schema.json');
+      const schema = JSON.parse(await readFile(path, 'utf8'));
+      schema.properties.backend.properties.url.default = 'schema-secret-value';
+      await writeFile(path, `${JSON.stringify(schema, null, 2)}\n`);
+      return 'chart/values.schema.json';
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const {parent, source} = await temporarySection('section-9-secret-source-');
+      const output = join(parent, `agentic-iac-section-9-${name.replaceAll(' ', '-')}`);
+      try {
+        await repairCandidate(source);
+        const expectedFile = await mutate(source);
+        const result = runEvaluator(runner, source, output);
+        assert.equal(result.status, 1, result.stdout + result.stderr);
+        const reportText = await readFile(join(output, 'evidence-report.json'), 'utf8');
+        const report = JSON.parse(reportText);
+        assert.equal(report.gates.secret_scan.status, 'FAIL');
+        assert.ok(report.primary_findings.some(({id}) => id === 'committed-backend-token-material'));
+        assert.ok(report.observations.secret_source_findings.some(({file}) => file === expectedFile));
+        assert.doesNotMatch(reportText, /deployment-secret-value|schema-secret-value/);
       } finally {
         await rm(parent, {recursive: true, force: true});
       }

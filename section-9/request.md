@@ -9,4 +9,8 @@ authenticated backend contract, probes, non-root security contexts, separate
 service accounts, stable labels, external Secret reference, or optional
 NetworkPolicy objects. Produce render and policy evidence for human review.
 
+Run evaluation only through `node labs/m9/check-section-9.mjs`. The author launcher
+verifies the protected evaluator, scope, tests, and task artifacts before the
+learner-owned chart is evaluated.
+
 A green static package is not approval to create a cluster or deploy it.
