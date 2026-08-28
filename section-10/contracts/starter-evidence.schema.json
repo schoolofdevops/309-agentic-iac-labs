@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "trusted_revision",
+    "candidate_revision",
+    "status",
+    "candidate_sha256",
+    "findings",
+    "terraform",
+    "helm",
+    "apply_permitted"
+  ],
+  "properties": {
+    "task_id": {"const": "section-10-task-3"},
+    "trusted_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "candidate_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "status": {"enum": ["REJECTED", "READY_FOR_HUMAN_REVIEW"]},
+    "candidate_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "findings": {"type": "array"},
+    "terraform": {"type": "object"},
+    "helm": {"type": "object"},
+    "apply_permitted": {"const": false}
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "task_id": "section-10-task-3",
+  "trusted_runner": "section-10/scripts/run-starter-review.mjs",
+  "evidence_schema": "section-10/contracts/starter-evidence.schema.json",
+  "cleanup": "section-10/scripts/cleanup-starter-evidence.mjs",
+  "delivery_policy": "section-10/policy/delivery.rego",
+  "workload_policy": "section-9/policy/workload.rego",
+  "candidate_root": "section-10/starter",
+  "learner_editable": [
+    "section-10/starter/changed-files.txt",
+    "section-10/starter/delivery-decision.json",
+    "section-10/starter/gitops/application.yaml",
+    "section-10/starter/terraform/main.tf"
+  ],
+  "accepted_changed_files": [
+    "section-10/starter/gitops/application.yaml",
+    "section-10/starter/terraform/main.tf"
+  ],
+  "unsafe_changed_files": [
+    "section-10/starter/gitops/application.yaml",
+    "section-10/starter/terraform/main.tf",
+    "section-10/starter/workflows/terraform-plan.yml"
+  ],
+  "identities": {
+    "author": "agent-author",
+    "reviewer": "human-platform-reviewer",
+    "delivery": "terraform-plan-workflow",
+    "runtime": "inference-platform-api"
+  },
+  "application": {
+    "apiVersion": "argoproj.io/v1alpha1",
+    "kind": "Application",
+    "name": "inference-platform",
+    "namespace": "argocd",
+    "project": "default",
+    "repoURL": "git://agentic-iac-s10-git:9418/delivery.git",
+    "targetRevision": "HEAD",
+    "path": "section-10/starter/gitops/chart",
+    "server": "https://kubernetes.default.svc",
+    "destinationNamespace": "inference"
+  },
+  "versions": {
+    "terraform": "1.14.8",
+    "opentofu": "1.12.6",
+    "helm": "v4.2.3",
+    "opa": "1.19.0"
+  }
+}

@@ -14,11 +14,13 @@ You may edit only these learner-owned files:
 - `starter/terraform/main.tf` — available only for a bounded intent correction;
   no Terraform defect is seeded, so the smallest repair leaves it unchanged.
 
-Do not edit the launcher, protected manifest, policy, tests, evidence schema,
-cleanup code, inert workflow, or chart. Do not create a repository-root GitHub
+Do not edit the trusted launcher, contract, policy, tests, evidence schema,
+cleanup code, inert workflow, or chart. They come from the separately approved
+Git base, not from your candidate. Do not create a repository-root GitHub
 workflow. Do not run Terraform/OpenTofu apply, Argo sync, Helm install, kubectl,
 or any cloud-changing command.
 
-Run the evaluator again with a new temporary output directory. A passing
-static result means the candidate is ready for a separate human review. It is
-not permission to commit, merge, sync, apply, deploy, or widen permissions.
+Commit the bounded candidate files, then run the approved-base evaluator with
+the full approved-base and candidate SHAs. A passing static result means the
+candidate is ready for a separate human review. It is not permission to merge,
+sync, apply, deploy, or widen permissions.
