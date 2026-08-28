@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicaCount", "image", "service", "backend", "resources", "probes", "networkPolicy"],
+  "properties": {
+    "replicaCount": {"type": "integer", "const": 1},
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "const": "309-agentic-iac/inference-platform"},
+        "tag": {"type": "string", "enum": ["s10-v1", "s10-v2"]},
+        "pullPolicy": {"type": "string", "const": "IfNotPresent"}
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "dependencies"],
+      "properties": {
+        "api": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "port", "nodePort"],
+          "properties": {
+            "type": {"const": "NodePort"},
+            "port": {"const": 8080},
+            "nodePort": {"const": 30080}
+          }
+        },
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "port"],
+          "properties": {
+            "type": {"const": "ClusterIP"},
+            "port": {"const": 8081}
+          }
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "existingSecret"],
+      "properties": {
+        "url": {"type": "string", "const": "http://inference-platform-dependencies:8081"},
+        "existingSecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "key"],
+          "properties": {
+            "name": {"const": "inference-platform-backend-token"},
+            "key": {"const": "token"}
+          }
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dependencies", "api", "worker"],
+      "properties": {
+        "dependencies": {"$ref": "#/definitions/resources"},
+        "api": {"$ref": "#/definitions/resources"},
+        "worker": {"$ref": "#/definitions/resources"}
+      }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["readiness", "liveness"],
+      "properties": {
+        "readiness": {"$ref": "#/definitions/probe"},
+        "liveness": {"$ref": "#/definitions/probe"}
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "enforcementNote"],
+      "properties": {
+        "enabled": {"const": false},
+        "enforcementNote": {"const": "Rendered policy is not proof of enforcement; use a policy-capable CNI."}
+      }
+    }
+  },
+  "definitions": {
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu", "memory"],
+          "properties": {"cpu": {"const": "10m"}, "memory": {"const": "32Mi"}}
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu", "memory"],
+          "properties": {"cpu": {"const": "100m"}, "memory": {"const": "64Mi"}}
+        }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["initialDelaySeconds", "periodSeconds", "timeoutSeconds", "failureThreshold"],
+      "properties": {
+        "initialDelaySeconds": {"type": "integer", "minimum": 0},
+        "periodSeconds": {"type": "integer", "minimum": 1},
+        "timeoutSeconds": {"type": "integer", "minimum": 1},
+        "failureThreshold": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

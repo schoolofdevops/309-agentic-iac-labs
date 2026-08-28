@@ -1,0 +1,112 @@
+{{- $root := . -}}
+{{- range $role := list "dependencies" "api" "worker" }}
+{{- $context := dict "root" $root "role" $role }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inference-platform.roleName" $context }}
+  labels:
+    {{- include "inference-platform.labels" $context | nindent 4 }}
+spec:
+  replicas: {{ $root.Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "inference-platform.selectorLabels" $context | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inference-platform.selectorLabels" $context | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "inference-platform.roleName" $context }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ $role }}
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+          {{- if eq $role "dependencies" }}
+          ports:
+            - name: http
+              containerPort: {{ $root.Values.service.dependencies.port }}
+              protocol: TCP
+          {{- else if eq $role "api" }}
+          ports:
+            - name: http
+              containerPort: {{ $root.Values.service.api.port }}
+              protocol: TCP
+          {{- end }}
+          env:
+            - name: ROLE
+              value: {{ $role | quote }}
+            {{- if eq $role "dependencies" }}
+            - name: LISTEN_ADDRESS
+              value: {{ printf ":%v" $root.Values.service.dependencies.port | quote }}
+            {{- else if eq $role "api" }}
+            - name: LISTEN_ADDRESS
+              value: {{ printf ":%v" $root.Values.service.api.port | quote }}
+            - name: BACKEND_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "inference-platform.name" $root }}
+                  key: BACKEND_URL
+            {{- else }}
+            - name: BACKEND_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "inference-platform.name" $root }}
+                  key: BACKEND_URL
+            {{- end }}
+            - name: BACKEND_TOKEN_FILE
+              value: /var/run/secrets/inference/token
+          resources:
+            {{- index $root.Values.resources $role | toYaml | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ if eq $role "dependencies" }}{{ $root.Values.service.dependencies.port }}{{ else }}{{ $root.Values.service.api.port }}{{ end }}
+              scheme: HTTP
+            initialDelaySeconds: {{ $root.Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ $root.Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ $root.Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ $root.Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ if eq $role "dependencies" }}{{ $root.Values.service.dependencies.port }}{{ else }}{{ $root.Values.service.api.port }}{{ end }}
+              scheme: HTTP
+            initialDelaySeconds: {{ $root.Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ $root.Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ $root.Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ $root.Values.probes.liveness.failureThreshold }}
+          volumeMounts:
+            - name: backend-token
+              mountPath: /var/run/secrets/inference
+              readOnly: true
+      volumes:
+        - name: backend-token
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: {{ $root.Values.backend.existingSecret.name }}
+                  optional: false
+                  items:
+                    - key: {{ $root.Values.backend.existingSecret.key }}
+                      path: token
+{{- end }}

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "status",
+    "candidate_sha256",
+    "findings",
+    "terraform",
+    "helm",
+    "apply_permitted"
+  ],
+  "properties": {
+    "task_id": {"const": "section-10-task-3"},
+    "status": {"enum": ["REJECTED", "READY_FOR_HUMAN_REVIEW"]},
+    "candidate_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "message"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^S10_[A-Z_]+$"},
+          "message": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "terraform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terraform", "opentofu"],
+      "properties": {
+        "terraform": {"const": "VALID"},
+        "opentofu": {"const": "VALID"}
+      }
+    },
+    "helm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lint", "render", "external_secret_reference", "network_policy_rendered"],
+      "properties": {
+        "lint": {"const": "PASS"},
+        "render": {"const": "PASS"},
+        "external_secret_reference": {"const": true},
+        "network_policy_rendered": {"const": false}
+      }
+    },
+    "apply_permitted": {"const": false}
+  }
+}

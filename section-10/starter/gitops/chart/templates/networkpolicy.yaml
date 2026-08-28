@@ -1,0 +1,16 @@
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "inference-platform.name" . }}-default-deny
+  annotations:
+    inference-platform.schoolofdevops.io/enforcement-note: {{ .Values.networkPolicy.enforcementNote | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+  policyTypes:
+    - Ingress
+    - Egress
+{{- end }}

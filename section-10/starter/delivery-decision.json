@@ -1,0 +1,15 @@
+{
+  "kind": "DeliveryDecision",
+  "task_id": "section-10-task-3",
+  "identities": {
+    "author": "agent-author",
+    "reviewer": "human-platform-reviewer",
+    "delivery": "terraform-plan-workflow",
+    "runtime": "inference-platform-api"
+  },
+  "approval": {
+    "requested_by": "agent-author",
+    "approved_by": "agent-author"
+  },
+  "apply_permitted": false
+}

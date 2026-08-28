@@ -1,0 +1,17 @@
+name: Privileged Terraform delivery
+
+on:
+  pull_request_target:
+    paths:
+      - "section-10/starter/**"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  reviewed-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inert course example
+        run: echo "This file is review input and is never installed at repository root."

@@ -1,0 +1,60 @@
+replicaCount: 1
+
+image:
+  repository: 309-agentic-iac/inference-platform
+  tag: s10-v1
+  pullPolicy: IfNotPresent
+
+service:
+  api:
+    type: NodePort
+    port: 8080
+    nodePort: 30080
+  dependencies:
+    type: ClusterIP
+    port: 8081
+
+backend:
+  url: http://inference-platform-dependencies:8081
+  existingSecret:
+    name: inference-platform-backend-token
+    key: token
+
+resources:
+  dependencies:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  api:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  worker:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+probes:
+  readiness:
+    initialDelaySeconds: 1
+    periodSeconds: 3
+    timeoutSeconds: 1
+    failureThreshold: 3
+  liveness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    timeoutSeconds: 1
+    failureThreshold: 3
+
+networkPolicy:
+  enabled: false
+  enforcementNote: Rendered policy is not proof of enforcement; use a policy-capable CNI.

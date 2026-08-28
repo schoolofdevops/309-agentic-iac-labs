@@ -1,0 +1,3 @@
+section-10/starter/terraform/main.tf
+section-10/starter/gitops/application.yaml
+section-10/starter/workflows/terraform-plan.yml

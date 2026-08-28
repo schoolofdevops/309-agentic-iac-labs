@@ -1,0 +1,32 @@
+diff --git a/section-10/starter/changed-files.txt b/section-10/starter/changed-files.txt
+--- a/section-10/starter/changed-files.txt
++++ b/section-10/starter/changed-files.txt
+@@ -1,3 +1,2 @@
+ section-10/starter/terraform/main.tf
+ section-10/starter/gitops/application.yaml
+-section-10/starter/workflows/terraform-plan.yml
+diff --git a/section-10/starter/delivery-decision.json b/section-10/starter/delivery-decision.json
+--- a/section-10/starter/delivery-decision.json
++++ b/section-10/starter/delivery-decision.json
+@@ -9,7 +9,7 @@
+   },
+   "approval": {
+     "requested_by": "agent-author",
+-    "approved_by": "agent-author"
++    "approved_by": "human-platform-reviewer"
+   },
+   "apply_permitted": false
+ }
+diff --git a/section-10/starter/gitops/application.yaml b/section-10/starter/gitops/application.yaml
+--- a/section-10/starter/gitops/application.yaml
++++ b/section-10/starter/gitops/application.yaml
+@@ -12,9 +12,6 @@ spec:
+   destination:
+     server: https://kubernetes.default.svc
+     namespace: inference
+   syncPolicy:
+-    automated:
+-      prune: true
+-      selfHeal: true
+     syncOptions:
+       - CreateNamespace=false

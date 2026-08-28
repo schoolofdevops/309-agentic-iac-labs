@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: inference-platform
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: git://agentic-iac-s10-git:9418/delivery.git
+    targetRevision: HEAD
+    path: section-10/starter/gitops/chart
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: inference
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
