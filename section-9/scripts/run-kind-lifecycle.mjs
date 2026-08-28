@@ -375,11 +375,12 @@ async function runLifecycle(sourceArgument, outputArgument, options) {
     report.measurements.cluster_create_elapsed_seconds = elapsedSeconds(clusterStarted);
     sampler = startSampler(samplesPath);
 
-    const nodeImage = execute('docker', ['image', 'inspect', '--format', '{{.Id}}\t{{.Size}}\t{{.Architecture}}', 'kindest/node:v1.34.0'], {records, allowFailure: true});
-    if (nodeImage.exit === 0) {
-      const [id, size, arch] = nodeImage.stdout.trim().split('\t');
-      report.measurements.kind_node_image = {id, size_bytes: Number(size), architecture: arch};
-    }
+    const nodeContainer = execute('docker', ['inspect', '--format', '{{.Image}}', EXACT.node], {records});
+    const nodeImageReference = nodeContainer.stdout.trim();
+    if (!/^sha256:[a-f0-9]{64}$/.test(nodeImageReference)) throw new Error('named Kind node did not report an immutable image digest');
+    const nodeImage = execute('docker', ['image', 'inspect', '--format', '{{.Id}}\t{{.RepoDigests}}\t{{.Size}}\t{{.Architecture}}', nodeImageReference], {records});
+    const [id, repositoryDigests, size, arch] = nodeImage.stdout.trim().split('\t');
+    report.measurements.kind_node_image = {id, repository_digests: repositoryDigests, size_bytes: Number(size), architecture: arch};
 
     execute('kind', ['load', 'docker-image', EXACT.image, '--name', EXACT.cluster], {records, timeout: 120_000});
     execute('kubectl', ['--context', EXACT.context, 'create', 'namespace', EXACT.namespace], {records});

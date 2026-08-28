@@ -42,6 +42,13 @@ test('Kind config maps the API only to loopback port 18080', async () => {
   assert.doesNotMatch(config, /0\.0\.0\.0/);
 });
 
+test('runner discovers the actual named Kind node image instead of assuming a version tag', async () => {
+  const source = await readFile(runner, 'utf8');
+  assert.match(source, /docker', \['inspect', '--format', '\{\{\.Image\}\}', EXACT\.node\]/);
+  assert.match(source, /docker', \['image', 'inspect',[\s\S]*nodeImageReference/);
+  assert.doesNotMatch(source, /kindest\/node:v\d/);
+});
+
 test('preflight rejects a wrong cluster name before invoking runtime tools', async () => {
   const runtime = await fakeRuntime();
   const output = join(runtime.root, 'agentic-iac-section-9-wrong-cluster');
