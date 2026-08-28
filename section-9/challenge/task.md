@@ -1,4 +1,4 @@
-# Challenge: Diagnose Three Kubernetes and Helm Failures
+# Advanced Live Diagnostics Lab: Diagnose Three Kubernetes and Helm Failures
 
 Start after the repaired Section 9 release is healthy. Keep the exact cluster
 `agentic-iac-s9`, context `kind-agentic-iac-s9`, namespace `inference`, and
@@ -60,14 +60,14 @@ inference-platform-api-...                0/1     Running   0
 Read the API warning event.
 
 ```bash
-command kubectl --context kind-agentic-iac-s9 --namespace inference get events --field-selector type=Warning --sort-by=.metadata.creationTimestamp | command grep -E 'inference-platform-api|LAST SEEN'
+command kubectl --context kind-agentic-iac-s9 --namespace inference get events --field-selector type=Warning --sort-by=.metadata.creationTimestamp | command awk 'NR==1 || (/inference-platform-api/ && /statuscode: 404/)'
 ```
 
 [ sample output ]
 
 ```text
-LAST SEEN   TYPE      REASON      OBJECT                               MESSAGE
-3s          Warning   Unhealthy   pod/inference-platform-api-...       Readiness probe failed: HTTP probe failed with statuscode: 404
+LAST SEEN   TYPE      REASON      OBJECT                                        MESSAGE
+2s          Warning   Unhealthy   pod/inference-platform-api-56f6f7b545-2d9gp   Readiness probe failed: HTTP probe failed with statuscode: 404
 ```
 
 Check the API EndpointSlice. Its conditions separate the old ready address
@@ -295,17 +295,21 @@ command kubectl --context kind-agentic-iac-s9 --namespace inference logs --selec
 Read the Helm render. It still uses the ConfigMap reference.
 
 ```bash
-helm get manifest inference-platform --kube-context kind-agentic-iac-s9 --namespace inference | command awk '/name: BACKEND_URL/{lines=5} lines{print; lines--}'
+helm get manifest inference-platform --kube-context kind-agentic-iac-s9 --namespace inference | yq 'select(.kind == "Deployment" and .metadata.name == "inference-platform-worker") | .spec.template.spec.containers[0].env[] | select(.name == "BACKEND_URL")'
 ```
 
 [ sample output ]
 
 ```text
-name: BACKEND_URL
-valueFrom:
-  configMapKeyRef:
-    name: inference-platform
-    key: BACKEND_URL
+{
+  "name": "BACKEND_URL",
+  "valueFrom": {
+    "configMapKeyRef": {
+      "name": "inference-platform",
+      "key": "BACKEND_URL"
+    }
+  }
+}
 ```
 
 Do not diagnose until Pod status, rollout status, events, endpoints, live

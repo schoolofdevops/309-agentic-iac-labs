@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {lstat, mkdir, readFile, readdir, realpath, rm, writeFile} from 'node:fs/promises';
+import {constants} from 'node:fs';
+import {access, lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {basename, dirname, isAbsolute, relative, resolve} from 'node:path';
+import {basename, delimiter, dirname, isAbsolute, relative, resolve} from 'node:path';
 
 const CHECK_RESOURCE_LIMITS = true;
 const CHECK_SECRET_MATERIAL = true;
@@ -43,6 +44,22 @@ function toolProbe(command, args) {
   const result = spawnSync(command, args, {encoding: 'utf8', shell: false, timeout: 30_000});
   if (result.error?.code === 'ENOENT') throw new Error(`required tool ${command} is unavailable`);
   if (result.status !== 0) throw new Error(`required tool ${command} probe exited ${result.status ?? 127}`);
+}
+
+async function resolveExecutable(command) {
+  for (const directory of (process.env.PATH || '').split(delimiter)) {
+    if (!directory) continue;
+    const candidate = resolve(directory, command);
+    try {
+      const candidateStat = await stat(candidate);
+      if (!candidateStat.isFile()) continue;
+      await access(candidate, constants.X_OK);
+      return candidate;
+    } catch (error) {
+      if (!['ENOENT', 'EACCES', 'ENOTDIR'].includes(error.code)) throw error;
+    }
+  }
+  throw new Error(`required tool ${command} is unavailable`);
 }
 
 function collectMessages(value, messages = []) {
@@ -142,14 +159,17 @@ async function main() {
     if (error.code !== 'ENOENT') throw error;
   }
 
-  const requiredTools = [
-    ['go', ['version']],
-    ['helm', ['version', '--short']],
-    ['kubeconform', ['-v']],
-    ['conftest', ['--version']],
-    ['yq', ['--version']],
-  ];
-  for (const [command, args] of requiredTools) toolProbe(command, args);
+  const toolArguments = {
+    go: ['version'],
+    helm: ['version', '--short'],
+    kubeconform: ['-v'],
+    conftest: ['--version'],
+    yq: ['--version'],
+  };
+  const toolPaths = Object.fromEntries(await Promise.all(Object.keys(toolArguments).map(async (command) => (
+    [command, await resolveExecutable(command)]
+  ))));
+  for (const [command, args] of Object.entries(toolArguments)) toolProbe(toolPaths[command], args);
 
   const started = new Date().toISOString();
   await mkdir(output);
@@ -189,35 +209,35 @@ async function main() {
   }
 
   const toolVersions = {};
-  for (const [command, args] of requiredTools) {
-    const probe = run(`version-${command}`, command, args, source, undefined, 30_000);
+  for (const [command, args] of Object.entries(toolArguments)) {
+    const probe = run(`version-${command}`, toolPaths[command], args, source, undefined, 30_000);
     toolVersions[command] = (probe.stdout || probe.stderr).split('\n').find((line) => line.trim())?.trim() || `exit ${probe.exit}`;
   }
 
-  const appTests = run('app-tests', 'go', ['test', './...'], resolve(source, 'app'));
-  const helmLint = run('helm-lint', 'helm', ['lint', '--strict', resolve(source, 'chart')], source);
-  const render = run('helm-render', 'helm', ['template', 'inference-platform', resolve(source, 'chart'), '--namespace', 'inference'], source);
+  const appTests = run('app-tests', toolPaths.go, ['test', './...'], resolve(source, 'app'));
+  const helmLint = run('helm-lint', toolPaths.helm, ['lint', '--strict', resolve(source, 'chart')], source);
+  const render = run('helm-render', toolPaths.helm, ['template', 'inference-platform', resolve(source, 'chart'), '--namespace', 'inference'], source);
   if (render.exit !== 0) throw new Error(`Helm render failed with exit ${render.exit}`);
   if (!render.stdout.trim()) throw new Error('empty render is not accepted');
 
-  const schemaEmptyImage = run('schema-empty-image', 'helm', [
+  const schemaEmptyImage = run('schema-empty-image', toolPaths.helm, [
     'template', 'inference-platform', resolve(source, 'chart'), '--namespace', 'inference', '--set-string', 'image.tag=',
   ], source);
-  const schemaInvalidPort = run('schema-invalid-api-port', 'helm', [
+  const schemaInvalidPort = run('schema-invalid-api-port', toolPaths.helm, [
     'template', 'inference-platform', resolve(source, 'chart'), '--namespace', 'inference', '--set', 'service.api.port=70000',
   ], source);
-  const schemaUnknownKey = run('schema-unknown-key', 'helm', [
+  const schemaUnknownKey = run('schema-unknown-key', toolPaths.helm, [
     'template', 'inference-platform', resolve(source, 'chart'), '--namespace', 'inference', '--set', 'unexpected=true',
   ], source);
-  const schemaWorkerLimitsOmitted = run('schema-worker-limits-omitted', 'helm', [
+  const schemaWorkerLimitsOmitted = run('schema-worker-limits-omitted', toolPaths.helm, [
     'template', 'inference-platform', resolve(source, 'chart'), '--namespace', 'inference', '--set-json', 'resources.worker.limits=null',
   ], source);
-  const schemaWorkerLimitCpuWrong = run('schema-worker-limit-cpu-wrong', 'helm', [
+  const schemaWorkerLimitCpuWrong = run('schema-worker-limit-cpu-wrong', toolPaths.helm, [
     'template', 'inference-platform', resolve(source, 'chart'), '--namespace', 'inference', '--set-string', 'resources.worker.limits.cpu=101m',
   ], source);
 
-  const kubeconform = run('kubeconform', 'kubeconform', ['-strict', '-summary', '-'], source, render.stdout);
-  const normalized = run('normalize-render', 'yq', ['-s', 'map(select(. != null))', '-'], source, render.stdout);
+  const kubeconform = run('kubeconform', toolPaths.kubeconform, ['-strict', '-summary', '-'], source, render.stdout);
+  const normalized = run('normalize-render', toolPaths.yq, ['-s', 'map(select(. != null))', '-'], source, render.stdout);
   if (normalized.exit !== 0) throw new Error(`render normalization failed with exit ${normalized.exit}`);
   let objects;
   try {
@@ -227,9 +247,9 @@ async function main() {
   }
   if (!Array.isArray(objects) || objects.length === 0) throw new Error('empty render is not accepted');
 
-  const conftest = run('conftest', 'conftest', ['test', '-', '-p', resolve(source, 'policy'), '--output', 'json'], source, render.stdout);
+  const conftest = run('conftest', toolPaths.conftest, ['test', '-', '-p', resolve(source, 'policy'), '--output', 'json'], source, render.stdout);
 
-  const parsedValues = run('parse-values', 'yq', ['.', resolve(source, 'chart/values.yaml')], source);
+  const parsedValues = run('parse-values', toolPaths.yq, ['.', resolve(source, 'chart/values.yaml')], source);
   if (parsedValues.exit !== 0) throw new Error(`values normalization failed with exit ${parsedValues.exit}`);
   const values = JSON.parse(parsedValues.stdout);
   const schema = JSON.parse(await readFile(resolve(source, 'chart/values.schema.json'), 'utf8'));
@@ -501,6 +521,7 @@ async function main() {
       cryptographic_self_attestation: false,
       statement: 'The external labs/m9 launcher, repository scope, Git review, and human approval protect evaluator integrity; the evaluator does not attest to itself.',
     },
+    tool_paths: toolPaths,
     tool_versions: toolVersions,
     decision,
     gates,

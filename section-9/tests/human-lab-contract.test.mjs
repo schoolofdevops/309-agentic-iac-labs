@@ -11,6 +11,7 @@ const read = (path) => readFileSync(new URL(path, root), 'utf8');
 test('diagnostic challenge contains exactly the three planned failures', () => {
   const task = read('challenge/task.md');
   const key = read('challenge/answer-key.md');
+  assert.match(task, /^# Advanced Live Diagnostics Lab: Diagnose Three Kubernetes and Helm Failures$/m);
   const failureIds = [
     'bad-readiness-path',
     'unreachable-backend-connection',
@@ -62,9 +63,13 @@ test('challenge recovery is exact and preserves the proof boundary', () => {
 test('challenge uses portable evidence filters and exact one-line NodePort output', () => {
   const task = read('challenge/task.md');
   assert.doesNotMatch(task, /\b(?:command\s+)?rg\b/);
-  assert.match(task, /\| command grep -E 'inference-platform-api\|LAST SEEN'/);
+  assert.match(task, /\| command awk 'NR==1 \|\| \(\/inference-platform-api\/ && \/statuscode: 404\/\)'/);
+  assert.doesNotMatch(task, /grep -E 'inference-platform-api\|LAST SEEN'/);
   assert.match(task, /\| command grep 'path: \/readyz'/);
   assert.match(task, /\| command grep -E 'inference-platform-worker\|LAST SEEN'/);
+  assert.match(task, /yq 'select\(\.kind == "Deployment" and \.metadata\.name == "inference-platform-worker"\)[^']+select\(\.name == "BACKEND_URL"\)'/);
+  assert.doesNotMatch(task, /awk '\/name: BACKEND_URL/);
+  assert.match(task, /```text\n\{\n  "name": "BACKEND_URL",[\s\S]*?"key": "BACKEND_URL"[\s\S]*?\n\}\n```/);
 
   const nodePortCommand = /\| command awk '\/nodePort:\/\{print "nodePort:", \$2; exit\}'/g;
   assert.equal((task.match(nodePortCommand) || []).length, 3);

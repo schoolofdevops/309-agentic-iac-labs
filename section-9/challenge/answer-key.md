@@ -1,4 +1,4 @@
-# Answer Key: Diagnose Three Kubernetes and Helm Failures
+# Answer Key: Advanced Live Diagnostics Lab
 
 Use this key only after you have recorded the evidence requested in `task.md`.
 A diagnosis without the evidence trail is incomplete.

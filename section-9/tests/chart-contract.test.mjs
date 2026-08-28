@@ -84,6 +84,23 @@ test('independent evaluator reports exactly two primary findings and keeps unrel
     assert.match(report.artifacts.render_sha256, /^[a-f0-9]{64}$/);
     assert.ok(report.commands.length >= 10);
     assert.ok(report.commands.every((command) => Array.isArray(command.argv) && Number.isInteger(command.exit)));
+    assert.match(report.tool_paths.helm, /^\//);
+    const helmCommandIds = new Set([
+      'version-helm',
+      'helm-lint',
+      'helm-render',
+      'schema-empty-image',
+      'schema-invalid-api-port',
+      'schema-unknown-key',
+      'schema-worker-limits-omitted',
+      'schema-worker-limit-cpu-wrong',
+    ]);
+    const helmCommands = report.commands.filter(({id}) => helmCommandIds.has(id));
+    assert.ok(helmCommands.length >= 7);
+    assert.ok(helmCommands.every(({argv}) => argv[0] === report.tool_paths.helm));
+    const directHelm = spawnSync(report.tool_paths.helm, ['version', '--short'], {encoding: 'utf8'});
+    assert.equal(directHelm.status, 0, directHelm.stdout + directHelm.stderr);
+    assert.equal(report.tool_versions.helm, (directHelm.stdout || directHelm.stderr).trim().split('\n')[0]);
     assert.ok(report.proof_limits.some((limit) => /does not create a Kind cluster/i.test(limit)));
     assert.ok(report.proof_limits.some((limit) => /NetworkPolicy enforcement/i.test(limit)));
 

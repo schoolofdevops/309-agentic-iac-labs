@@ -1,5 +1,9 @@
-# Independent challenge boundary
+# Advanced live diagnostics lab
 
-The independent Section 9 challenge is added only after the repaired package
-passes the measured Kind lifecycle. This directory reserves that learner
-boundary without publishing an unproven runtime exercise.
+This optional lab starts only after the repaired Section 9 package passes the
+measured Kind lifecycle. It deliberately injects, observes, and recovers three
+faults on the disposable local cluster. Complete one recovery before injecting
+the next fault.
+
+The course site's Operator Challenge is different. It is an independent
+packet-only review with no injection or repair commands.
