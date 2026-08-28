@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-const SAFE_WORKFLOW_SHA256 = "1cef58c8665dd364842b489e876980f28f9c63d26a7fa8ecb30eac8de69d1307";
+const SAFE_WORKFLOW_SHA256 = "337c1561ebebff73c35180216bdccae24e27d7ab530f269a3c55d05141a66bd2";
 
 class ContractError extends Error {
   constructor(code, message) {

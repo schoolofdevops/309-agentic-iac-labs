@@ -9,6 +9,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,16 +21,18 @@ const WORKFLOW_RELATIVE_PATH = "section-10/workflows/terraform-plan.yml";
 const TERRAFORM_RELATIVE_PATH = "section-10/terraform";
 const CHECKER_RELATIVE_PATH = "section-10/scripts/check-delivery-change.mjs";
 const RUNNER_RELATIVE_PATH = "section-10/scripts/run-reviewed-plan.mjs";
-const SAFE_WORKFLOW_SHA256 = "1cef58c8665dd364842b489e876980f28f9c63d26a7fa8ecb30eac8de69d1307";
+const SAFE_WORKFLOW_SHA256 = "337c1561ebebff73c35180216bdccae24e27d7ab530f269a3c55d05141a66bd2";
 const SAFE_TEST_SHA256 = "45cb820aec176450d9f09fac29f34316e9cd85f3f006ce453c58a8b0f0df8a3a";
 const SAFE_MAIN_SHA256 = "1be8f6407f2726f5b346ed9a761ce69700fb1884f2fdb48d52789f694148fd46";
 const GIT = "/usr/bin/git";
 const ENGINE = {
   terraform: {
+    binaryName: "terraform",
     version: "1.14.8",
     candidates: ["/opt/homebrew/bin/terraform", "/usr/local/bin/terraform", "/usr/bin/terraform"],
   },
   opentofu: {
+    binaryName: "tofu",
     version: "1.12.6",
     candidates: ["/opt/homebrew/bin/tofu", "/usr/local/bin/tofu", "/usr/bin/tofu"],
   },
@@ -49,6 +52,13 @@ function reject(code, message) {
 function argument(name) {
   const index = process.argv.indexOf(name);
   if (index < 0 || index === process.argv.length - 1) reject("USAGE", `missing ${name}`);
+  return process.argv[index + 1];
+}
+
+function optionalArgument(name) {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return undefined;
+  if (index === process.argv.length - 1) reject("USAGE", `missing value for ${name}`);
   return process.argv[index + 1];
 }
 
@@ -222,13 +232,48 @@ function validateTerraformFiles(files) {
   }
 }
 
-function trustedEngine(profile) {
+function trustedEngine(profile, explicitPath, expectedSha256) {
+  if (explicitPath || expectedSha256) {
+    if (!explicitPath || !/^[0-9a-f]{64}$/.test(expectedSha256 ?? "") || !isAbsolute(explicitPath)) {
+      reject("ENGINE_BINDING_INVALID", "explicit engine requires an absolute path and SHA-256");
+    }
+    const logicalTemporaryRoot = resolve(tmpdir());
+    const canonicalTemporaryRoot = realpathSync(logicalTemporaryRoot);
+    const absolute = resolve(explicitPath);
+    if ((!absolute.startsWith(`${logicalTemporaryRoot}${sep}`) && !absolute.startsWith(`${canonicalTemporaryRoot}${sep}`)) || basename(absolute) !== profile.binaryName) {
+      reject("ENGINE_PATH_UNTRUSTED", explicitPath);
+    }
+    const parent = dirname(absolute);
+    if (lstatSync(parent).isSymbolicLink() || lstatSync(absolute).isSymbolicLink()) reject("ENGINE_PATH_UNTRUSTED", explicitPath);
+    const canonicalParent = realpathSync(parent);
+    if (dirname(canonicalParent) !== canonicalTemporaryRoot || !basename(canonicalParent).startsWith("agentic-iac-s10-engine-")) {
+      reject("ENGINE_PATH_UNTRUSTED", explicitPath);
+    }
+    const parentStat = statSync(canonicalParent);
+    const fileStat = statSync(absolute);
+    const currentUid = typeof process.getuid === "function" ? process.getuid() : fileStat.uid;
+    if (parentStat.uid !== currentUid || fileStat.uid !== currentUid || (parentStat.mode & 0o077) !== 0 || (fileStat.mode & 0o022) !== 0 || (fileStat.mode & 0o100) === 0 || !fileStat.isFile()) {
+      reject("ENGINE_PATH_UNTRUSTED", explicitPath);
+    }
+    const bytes = readFileSync(absolute);
+    if (sha256(bytes) !== expectedSha256) reject("ENGINE_HASH_MISMATCH", explicitPath);
+    return { binaryName: profile.binaryName, bytes };
+  }
   for (const candidate of profile.candidates) {
     if (!existsSync(candidate)) continue;
     const executable = realpathSync(candidate);
-    if (lstatSync(executable).isFile()) return executable;
+    if (lstatSync(executable).isFile()) return { executable };
   }
   reject("ENGINE_NOT_TRUSTED", `none of the fixed engine paths exist: ${profile.candidates.join(", ")}`);
+}
+
+function materializeEngine(output, binding) {
+  if (binding.executable) return binding.executable;
+  const directory = join(output, "engine");
+  const executable = join(directory, binding.binaryName);
+  mkdirSync(directory, { mode: 0o700 });
+  writeFileSync(executable, binding.bytes, { mode: 0o500 });
+  return executable;
 }
 
 function createOutput(requested, source) {
@@ -290,7 +335,7 @@ function main() {
     const engineName = argument("--engine");
     const profile = ENGINE[engineName];
     if (!profile) reject("UNKNOWN_ENGINE", "accepted values are exactly terraform and opentofu");
-    const executable = trustedEngine(profile);
+    const engineBinding = trustedEngine(profile, optionalArgument("--engine-path"), optionalArgument("--engine-sha256"));
     const sourceInput = argument("--source");
     if (lstatSync(sourceInput).isSymbolicLink()) reject("SYMLINK_FORBIDDEN", sourceInput);
     const source = realpathSync(sourceInput);
@@ -312,6 +357,7 @@ function main() {
     output = createOutput(argument("--output"), source);
     writeFileSync(join(output, ".agentic-iac-s10-evidence-root"), `${TASK_ID}\n`, { mode: 0o600 });
     const env = executionEnvironment(output);
+    const executable = materializeEngine(output, engineBinding);
     const materialized = materialize(output, terraformFiles, workflowBytes, evaluator.checker);
     command(process.execPath, [materialized.checkerPath, "--workflow", materialized.workflowPath], output, env);
     const versionJson = command(executable, ["version", "-json"], materialized.workingDirectory, env).stdout;

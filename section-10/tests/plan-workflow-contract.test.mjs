@@ -46,14 +46,14 @@ const rejectedMutations = [
   ["adds destroy", "terraform-plan", "terraform-destroy", "WORKFLOW_INVARIANT"],
   ["removes concurrency", /concurrency:\n  group: [^\n]+\n  cancel-in-progress: true\n/, "", "WORKFLOW_INVARIANT"],
   ["makes artifact retention unbounded", "retention-days: 7", "retention-days: 91", "WORKFLOW_INVARIANT"],
-  ["interpolates event data into a shell command", "node section-10/scripts/run-reviewed-plan.mjs", "echo ${{ github.event.pull_request.title }}\n          node section-10/scripts/run-reviewed-plan.mjs", "WORKFLOW_INVARIANT"],
+  ["interpolates event data into a shell command", "node trusted/section-10/scripts/run-reviewed-plan.mjs", "echo ${{ github.event.pull_request.title }}\n          node trusted/section-10/scripts/run-reviewed-plan.mjs", "WORKFLOW_INVARIANT"],
   ["hides pull_request in a decoy scalar", "on:\n  pull_request:", "x-decoy: |\n  pull_request:\non:\n  workflow_dispatch:", "WORKFLOW_INVARIANT"],
   ["uses an attacker action with an official pin in a comment", /uses: actions\/checkout@[0-9a-f]{40}/, "uses: attacker/example@main # actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "WORKFLOW_INVARIANT"],
   ["uses an arbitrary attacker action pinned to forty hex characters", /uses: actions\/checkout@[0-9a-f]{40}/, `uses: attacker/example@${"a".repeat(40)}`, "WORKFLOW_INVARIANT"],
   ["uses bracket-style secret access", "TF_IN_AUTOMATION: \"true\"", "TF_IN_AUTOMATION: ${{ secrets['TF_TOKEN'] }}", "WORKFLOW_INVARIANT"],
   ["uploads the filesystem root", "path: /tmp/agentic-iac-s10-plan-evidence", "path: /", "WORKFLOW_INVARIANT"],
-  ["places an event expression in run", "node section-10/scripts/run-reviewed-plan.mjs", "echo ${{ github.event.pull_request.title }}\n          node section-10/scripts/run-reviewed-plan.mjs", "WORKFLOW_INVARIANT"],
-  ["removes checkout credential disabling", "        with:\n          persist-credentials: false\n\n      # Pin source: https://github.com/hashicorp/setup-terraform", "\n      # Pin source: https://github.com/hashicorp/setup-terraform", "WORKFLOW_INVARIANT"],
+  ["places an event expression in run", "node trusted/section-10/scripts/run-reviewed-plan.mjs", "echo ${{ github.event.pull_request.title }}\n          node trusted/section-10/scripts/run-reviewed-plan.mjs", "WORKFLOW_INVARIANT"],
+  ["removes checkout credential disabling", "          persist-credentials: false", "          persist-credentials: true", "WORKFLOW_INVARIANT"],
   ["moves artifact bounds outside the upload step", "          path: /tmp/agentic-iac-s10-plan-evidence\n          if-no-files-found: error\n          retention-days: 7", "          path: /tmp/decoy\n\n      - name: Decoy artifact text\n        env:\n          NOTE: 'path: /tmp/agentic-iac-s10-plan-evidence retention-days: 7 if-no-files-found: error'\n        run: echo decoy", "WORKFLOW_INVARIANT"],
 ];
 

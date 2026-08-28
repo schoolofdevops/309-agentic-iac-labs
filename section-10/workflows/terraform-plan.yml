@@ -21,8 +21,18 @@ jobs:
     timeout-minutes: 15
     steps:
       # Pin source: https://github.com/actions/checkout/releases/tag/v7.0.1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Check out approved evaluator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out candidate data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
           persist-credentials: false
 
       # Pin source: https://github.com/hashicorp/setup-terraform/releases/tag/v4.0.1
@@ -31,11 +41,25 @@ jobs:
           terraform_version: 1.14.8
           terraform_wrapper: false
 
+      - name: Bind setup-action Terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          engine_source="$(command -v terraform)"
+          engine_root="$(mktemp -d /tmp/agentic-iac-s10-engine-XXXXXX)"
+          /usr/bin/install -m 0500 "$engine_source" "$engine_root/terraform"
+          engine_sha="$(sha256sum "$engine_root/terraform" | cut -d ' ' -f 1)"
+          printf 'S10_ENGINE_PATH=%s\n' "$engine_root/terraform" >> "$GITHUB_ENV"
+          printf 'S10_ENGINE_SHA256=%s\n' "$engine_sha" >> "$GITHUB_ENV"
+
       - name: Evaluate reviewed plan
         run: >-
-          node section-10/scripts/run-reviewed-plan.mjs
+          node trusted/section-10/scripts/run-reviewed-plan.mjs
           --engine terraform
-          --source .
+          --engine-path "$S10_ENGINE_PATH"
+          --engine-sha256 "$S10_ENGINE_SHA256"
+          --source candidate
           --manifest "$RUNNER_TEMP/reviewed-change.json"
           --output /tmp/agentic-iac-s10-plan-evidence
 

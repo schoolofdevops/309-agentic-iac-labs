@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  appendFileSync,
+  chmodSync,
   cpSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -81,19 +84,40 @@ function manifestFor(source, overrides = {}) {
   };
 }
 
-function run(source, { engine = "terraform", manifest = manifestFor(source), output = newOutput(), manifestPath, env = {} } = {}) {
+function run(source, {
+  engine = "terraform",
+  enginePath,
+  engineSha256,
+  manifest = manifestFor(source),
+  output = newOutput(),
+  manifestPath,
+  env = {},
+} = {}) {
   const createdManifestRoot = manifestPath ? undefined : mkdtempSync(join(tmpdir(), "agentic-iac-s10-manifest-test-"));
   const external = manifestPath ?? join(createdManifestRoot, "change.json");
   if (!manifestPath) writeFileSync(external, `${JSON.stringify(manifest, null, 2)}\n`);
-  const result = spawnSync(process.execPath, [
+  const args = [
     runner,
     "--engine", engine,
     "--source", source,
     "--manifest", external,
     "--output", output,
-  ], { encoding: "utf8", shell: false, env: { ...process.env, ...env } });
+  ];
+  if (enginePath) args.push("--engine-path", enginePath);
+  if (engineSha256) args.push("--engine-sha256", engineSha256);
+  const result = spawnSync(process.execPath, args, { encoding: "utf8", shell: false, env: { ...process.env, ...env } });
   if (createdManifestRoot) rmSync(createdManifestRoot, { recursive: true, force: true });
   return { ...result, output, manifestPath: external };
+}
+
+function setupActionEngine() {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-engine-"));
+  const executable = join(root, "terraform");
+  const marker = join(root, "invoked.log");
+  const installed = realpathSync("/opt/homebrew/bin/terraform");
+  writeFileSync(executable, `#!/bin/sh\nprintf invoked >> "${marker}"\nexec "${installed}" "$@"\n`);
+  chmodSync(executable, 0o500);
+  return { root, executable, marker, sha256: sha256(executable) };
 }
 
 function expectRejected(result, code) {
@@ -280,6 +304,93 @@ test("a post-validation worktree mutation cannot change the immutable plan input
   rmSync(output, { recursive: true, force: true });
   rmSync(manifestRoot, { recursive: true, force: true });
   rmSync(source, { recursive: true, force: true });
+});
+
+test("the workflow launches the approved-base runner and candidate runner bytes never execute", () => {
+  const workflow = readFileSync(sourceWorkflow, "utf8");
+  const commandMatch = workflow.match(/node\s+([^\s]+run-reviewed-plan\.mjs)/);
+  assert.ok(commandMatch, "workflow must contain a runner command");
+  assert.equal(commandMatch[1], "trusted/section-10/scripts/run-reviewed-plan.mjs");
+
+  const source = makeSource();
+  const bootstrap = mkdtempSync(join(tmpdir(), "agentic-iac-s10-workflow-bootstrap-"));
+  const candidateMarker = join(bootstrap, "candidate-runner-executed");
+  const candidateRunner = join(source, "section-10", "scripts", "run-reviewed-plan.mjs");
+  writeFileSync(candidateRunner, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(candidateMarker)}, "executed\\n");\n`);
+  git(source, ["add", "section-10/scripts/run-reviewed-plan.mjs"]);
+  git(source, ["commit", "-qm", "malicious candidate runner"]);
+  const baseRevision = git(source, ["rev-list", "--max-parents=0", "HEAD"]);
+  const sourceRevision = git(source, ["rev-parse", "HEAD"]);
+  git(bootstrap, ["clone", "-q", source, "candidate"]);
+  git(bootstrap, ["clone", "-q", source, "trusted"]);
+  git(join(bootstrap, "trusted"), ["checkout", "-q", baseRevision]);
+  const manifestPath = join(bootstrap, "reviewed-change.json");
+  writeFileSync(manifestPath, `${JSON.stringify({
+    task_id: taskId,
+    base_revision: baseRevision,
+    source_revision: sourceRevision,
+    workflow_sha256: sha256(join(bootstrap, "candidate", "section-10", "workflows", "terraform-plan.yml")),
+    proposer: "authoring-agent",
+    approver: "human-reviewer",
+    changed_files: ["section-10/scripts/run-reviewed-plan.mjs", "section-10/terraform/main.tf"],
+  }, null, 2)}\n`);
+  const output = newOutput("workflow-bootstrap");
+  const result = spawnSync(process.execPath, [
+    join(bootstrap, commandMatch[1]),
+    "--engine", "terraform",
+    "--source", join(bootstrap, "candidate"),
+    "--manifest", manifestPath,
+    "--output", output,
+  ], { cwd: bootstrap, encoding: "utf8", shell: false });
+  const candidateExecuted = existsSync(candidateMarker);
+  if (existsSync(output)) rmSync(output, { recursive: true, force: true });
+  rmSync(source, { recursive: true, force: true });
+  rmSync(bootstrap, { recursive: true, force: true });
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.match(result.stderr, /WORKFLOW_IMMUTABLE|EVALUATOR_MISMATCH/);
+  assert.equal(candidateExecuted, false);
+});
+
+test("accepts a hash-bound setup-action engine from an evaluator-owned temporary path", () => {
+  const source = makeSource();
+  const engine = setupActionEngine();
+  const result = run(source, { enginePath: engine.executable, engineSha256: engine.sha256 });
+  try {
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(engine.marker), true, "the explicitly bound engine must execute");
+  } finally {
+    if (existsSync(result.output)) rmSync(result.output, { recursive: true, force: true });
+    rmSync(engine.root, { recursive: true, force: true });
+    rmSync(source, { recursive: true, force: true });
+  }
+});
+
+test("rejects a setup-action engine whose bytes changed after hashing", () => {
+  const source = makeSource();
+  const engine = setupActionEngine();
+  chmodSync(engine.executable, 0o700);
+  appendFileSync(engine.executable, "# tampered\n");
+  chmodSync(engine.executable, 0o500);
+  const result = run(source, { enginePath: engine.executable, engineSha256: engine.sha256 });
+  if (existsSync(result.output)) rmSync(result.output, { recursive: true, force: true });
+  rmSync(engine.root, { recursive: true, force: true });
+  rmSync(source, { recursive: true, force: true });
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.match(result.stderr, /ENGINE_HASH_MISMATCH/);
+});
+
+test("rejects a symlink substituted for the setup-action engine", () => {
+  const source = makeSource();
+  const engineRoot = mkdtempSync(join(tmpdir(), "agentic-iac-s10-engine-"));
+  const executable = join(engineRoot, "terraform");
+  const installed = realpathSync("/opt/homebrew/bin/terraform");
+  symlinkSync(installed, executable);
+  const result = run(source, { enginePath: executable, engineSha256: sha256(installed) });
+  if (existsSync(result.output)) rmSync(result.output, { recursive: true, force: true });
+  rmSync(engineRoot, { recursive: true, force: true });
+  rmSync(source, { recursive: true, force: true });
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.match(result.stderr, /ENGINE_PATH_UNTRUSTED/);
 });
 
 test("rejects a caller-controlled output parent even when it is below OS temp", () => {
