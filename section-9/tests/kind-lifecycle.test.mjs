@@ -50,6 +50,41 @@ test('runner discovers the actual named Kind node image instead of assuming a ve
   assert.doesNotMatch(source, /kindest\/node:v\d/);
 });
 
+test('sampler begins before Kind creation and records one pre-create attempt', async () => {
+  const source = await readFile(runner, 'utf8');
+  const samplerStart = source.indexOf('sampler = startSampler(samplesPath)');
+  const firstAttempt = source.indexOf('await waitForSamplerAttempt(samplesPath)');
+  const clusterCreate = source.indexOf("execute('kind', ['create', 'cluster'");
+  assert.notEqual(samplerStart, -1);
+  assert.notEqual(firstAttempt, -1);
+  assert.notEqual(clusterCreate, -1);
+  assert.ok(samplerStart < firstAttempt, 'sampler must start before its first recorded attempt');
+  assert.ok(firstAttempt < clusterCreate, 'one sampler attempt must be recorded before Kind creation');
+});
+
+test('sampler continues through exact cluster cleanup before it stops', async () => {
+  const source = await readFile(runner, 'utf8');
+  const cleanupStart = source.indexOf('async function cleanupRuntime');
+  const cleanupEnd = source.indexOf('\nasync function runLifecycle', cleanupStart);
+  const cleanupSource = source.slice(cleanupStart, cleanupEnd);
+  const clusterDelete = cleanupSource.indexOf('cleanupScript, marker');
+  const postDeleteAttempt = cleanupSource.indexOf('await waitForSamplerAttempt(samplesPath,');
+  const samplerStop = cleanupSource.indexOf('await stopSampler(sampler)');
+  assert.notEqual(clusterDelete, -1);
+  assert.notEqual(postDeleteAttempt, -1);
+  assert.notEqual(samplerStop, -1);
+  assert.ok(clusterDelete < postDeleteAttempt, 'sampler must observe after exact cluster deletion');
+  assert.ok(postDeleteAttempt < samplerStop, 'sampler must stop only after the post-delete attempt');
+});
+
+test('runtime report separates Docker allocation from named-node memory samples', async () => {
+  const source = await readFile(runner, 'utf8');
+  assert.match(source, /configured_capacity_not_working_set: true/);
+  assert.match(source, /measurement_scope: 'named Kind node container via docker stats'/);
+  assert.match(source, /does not measure the Docker Desktop Linux VM working set/);
+  assert.doesNotMatch(source, /runtime VM memory is measured/i);
+});
+
 test('fake runtime fixtures register recursive cleanup with the owning test', async () => {
   const source = await readFile(import.meta.filename, 'utf8');
   assert.match(source, /async function fakeRuntime\(testContext,[\s\S]{0,800}testContext\.after\(async \(\) => rm\(root, \{recursive: true, force: true\}\)\)/);

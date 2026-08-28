@@ -225,22 +225,53 @@ async function stopSampler(child) {
   });
 }
 
-async function loadSamples(path) {
+async function readSampleRecords(path) {
   try {
-    const samples = (await readFile(path, 'utf8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
-    const valid = samples.filter(({exit, memory_bytes: bytes}) => exit === 0 && Number.isFinite(bytes));
-    const peakBytes = valid.reduce((peak, sample) => Math.max(peak, sample.memory_bytes), 0);
-    return {
-      sample_count: valid.length,
-      peak_memory_bytes: peakBytes,
-      peak_memory_mib: Number((peakBytes / 1024 ** 2).toFixed(1)),
-      first_sample_at: valid[0]?.sampled_at || null,
-      last_sample_at: valid.at(-1)?.sampled_at || null,
-    };
+    return (await readFile(path, 'utf8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
   } catch (error) {
-    if (error.code === 'ENOENT') return {sample_count: 0, peak_memory_bytes: 0, peak_memory_mib: 0};
+    if (error.code === 'ENOENT') return [];
     throw error;
   }
+}
+
+async function waitForSamplerAttempt(path, previousCount = 0, requireNodeAbsent = false) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const samples = await readSampleRecords(path);
+    if (samples.length > previousCount && (!requireNodeAbsent || samples.at(-1).exit !== 0)) return samples.length;
+    await delay(100);
+  }
+  throw new Error(requireNodeAbsent
+    ? 'sampler did not record the named Kind node as absent after cleanup'
+    : 'sampler did not record an attempt before Kind creation');
+}
+
+async function loadSamples(path) {
+  const samples = await readSampleRecords(path);
+  const valid = samples.filter(({exit, memory_bytes: bytes}) => exit === 0 && Number.isFinite(bytes));
+  const peakBytes = valid.reduce((peak, sample) => Math.max(peak, sample.memory_bytes), 0);
+  const firstPresentIndex = samples.findIndex(({exit, memory_bytes: bytes}) => exit === 0 && Number.isFinite(bytes));
+  let lastPresentIndex = -1;
+  for (let index = samples.length - 1; index >= 0; index -= 1) {
+    if (samples[index].exit === 0 && Number.isFinite(samples[index].memory_bytes)) {
+      lastPresentIndex = index;
+      break;
+    }
+  }
+  const firstAbsentAfterNode = lastPresentIndex === -1
+    ? null
+    : samples.slice(lastPresentIndex + 1).find(({exit}) => exit !== 0) || null;
+  return {
+    measurement_scope: 'named Kind node container via docker stats',
+    attempt_count: samples.length,
+    pre_appearance_attempt_count: firstPresentIndex === -1 ? samples.length : firstPresentIndex,
+    sample_count: valid.length,
+    peak_memory_bytes: peakBytes,
+    peak_memory_mib: Number((peakBytes / 1024 ** 2).toFixed(1)),
+    first_node_observed_at: valid[0]?.sampled_at || null,
+    last_node_observed_at: valid.at(-1)?.sampled_at || null,
+    first_absent_after_node_at: firstAbsentAfterNode?.sampled_at || null,
+  };
 }
 
 function curl(records, args, allowFailure = false) {
@@ -254,9 +285,8 @@ function parseHTTPResponse(stdout) {
   return {body: stdout.slice(0, offset).trim(), status: Number(stdout.slice(offset + marker.length).trim())};
 }
 
-async function cleanupRuntime({marker, report, sampler, clusterMayExist, namespaceMayExist, releaseMayExist}) {
+async function cleanupRuntime({marker, report, sampler, samplesPath, clusterMayExist, namespaceMayExist, releaseMayExist}) {
   const cleanupStarted = Date.now();
-  await stopSampler(sampler);
   const records = report.cleanup.commands;
   let cleanupError = null;
   try {
@@ -276,9 +306,14 @@ async function cleanupRuntime({marker, report, sampler, clusterMayExist, namespa
       const cleaned = execute(process.execPath, [cleanupScript, marker], {records, allowFailure: true, timeout: 120_000});
       if (cleaned.exit !== 0 && clusterExists) throw new Error(`exact Kind cleanup exited ${cleaned.exit}`);
     }
+    if (sampler) {
+      const attemptsBeforePostDelete = (await readSampleRecords(samplesPath)).length;
+      await waitForSamplerAttempt(samplesPath, attemptsBeforePostDelete, true);
+    }
   } catch (error) {
     cleanupError = error;
   }
+  await stopSampler(sampler);
 
   const remainingClusters = execute('kind', ['get', 'clusters'], {records, allowFailure: true});
   const remainingContainers = execute('docker', ['ps', '-a', '--filter', `name=${EXACT.node}`, '--format', '{{.Names}}'], {records, allowFailure: true});
@@ -310,14 +345,18 @@ async function runLifecycle(sourceArgument, outputArgument, options) {
     mode: options.mode,
     started_at: now(),
     exact_names: EXACT,
-    environment: {docker, normalized_architecture: architecture},
+    environment: {
+      docker: {...docker, configured_capacity_not_working_set: true},
+      normalized_architecture: architecture,
+    },
     commands: records,
     measurements: {},
     observations: {},
     cleanup: {status: 'PENDING', commands: []},
     proof_limits: [
       'NetworkPolicy is disabled in this Kind profile; no enforcement claim is made.',
-      'The measurement covers the named Kind node, not total host or Docker Desktop VM memory.',
+      'Named-workload memory is sampled from the Kind node container with docker stats; this does not measure the Docker Desktop Linux VM working set.',
+      'Docker CPU and memory allocation are reported separately as configured capacity, not observed working-set usage.',
       'Runtime success is evidence for this exact chart, image, architecture, and run only.',
     ],
   };
@@ -369,11 +408,12 @@ async function runLifecycle(sourceArgument, outputArgument, options) {
     const [imageId, imageSize, imageArchitecture] = image.stdout.trim().split('\t');
     report.measurements.workload_image = {id: imageId, size_bytes: Number(imageSize), architecture: imageArchitecture};
 
+    sampler = startSampler(samplesPath);
+    report.measurements.pre_create_sampler_attempt_count = await waitForSamplerAttempt(samplesPath);
     clusterMayExist = true;
     const clusterStarted = Date.now();
     execute('kind', ['create', 'cluster', '--name', EXACT.cluster, '--config', resolve(source, 'tools/kind/cluster.yaml'), '--wait', '120s'], {records, timeout: 180_000});
     report.measurements.cluster_create_elapsed_seconds = elapsedSeconds(clusterStarted);
-    sampler = startSampler(samplesPath);
 
     const nodeContainer = execute('docker', ['inspect', '--format', '{{.Image}}', EXACT.node], {records});
     const nodeImageReference = nodeContainer.stdout.trim();
@@ -454,6 +494,7 @@ async function runLifecycle(sourceArgument, outputArgument, options) {
       marker,
       report,
       sampler,
+      samplesPath,
       clusterMayExist,
       namespaceMayExist,
       releaseMayExist,
@@ -461,6 +502,12 @@ async function runLifecycle(sourceArgument, outputArgument, options) {
     report.measurements.node = await loadSamples(samplesPath);
     report.measurements.total_elapsed_seconds = elapsedSeconds(totalStarted);
     report.completed_at = now();
+    if (sampler && (report.measurements.pre_create_sampler_attempt_count < 1
+      || !report.measurements.node.first_node_observed_at
+      || !report.measurements.node.first_absent_after_node_at)) {
+      report.result = 'FAIL';
+      report.error = report.error || 'sampler did not cover pre-create through post-cleanup node lifetime';
+    }
     if (cleanupError || report.cleanup.status !== 'PASS') {
       report.result = 'FAIL';
       report.error = report.error || cleanupError?.message || 'cleanup verification failed';
