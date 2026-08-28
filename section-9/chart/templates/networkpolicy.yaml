@@ -1,0 +1,132 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $note := .Values.networkPolicy.enforcementNote | quote }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "inference-platform.name" . }}-default-deny
+  labels:
+    app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+    app.kubernetes.io/component: network-policy
+  annotations:
+    inference-platform.schoolofdevops.io/enforcement-note: {{ $note }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "inference-platform.name" . }}-api-ingress
+  labels:
+    app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+    app.kubernetes.io/component: network-policy
+  annotations:
+    inference-platform.schoolofdevops.io/enforcement-note: {{ $note }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.service.api.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "inference-platform.name" . }}-dependencies-ingress
+  labels:
+    app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+    app.kubernetes.io/component: network-policy
+  annotations:
+    inference-platform.schoolofdevops.io/enforcement-note: {{ $note }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+      app.kubernetes.io/component: dependencies
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - api
+                  - worker
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.dependencies.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "inference-platform.name" . }}-backend-egress
+  labels:
+    app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+    app.kubernetes.io/component: network-policy
+  annotations:
+    inference-platform.schoolofdevops.io/enforcement-note: {{ $note }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - api
+          - worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+              app.kubernetes.io/component: dependencies
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.dependencies.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "inference-platform.name" . }}-dns-egress
+  labels:
+    app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+    app.kubernetes.io/component: network-policy
+  annotations:
+    inference-platform.schoolofdevops.io/enforcement-note: {{ $note }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "inference-platform.name" . }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

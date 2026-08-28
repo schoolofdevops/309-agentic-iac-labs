@@ -1,0 +1,23 @@
+{{- $root := . -}}
+{{- range $role := list "dependencies" "api" }}
+{{- $context := dict "root" $root "role" $role }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inference-platform.roleName" $context }}
+  labels:
+    {{- include "inference-platform.labels" $context | nindent 4 }}
+spec:
+  type: {{ if eq $role "api" }}{{ $root.Values.service.api.type }}{{ else }}{{ $root.Values.service.dependencies.type }}{{ end }}
+  selector:
+    {{- include "inference-platform.selectorLabels" $context | nindent 4 }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: {{ if eq $role "api" }}{{ $root.Values.service.api.port }}{{ else }}{{ $root.Values.service.dependencies.port }}{{ end }}
+      targetPort: {{ if eq $role "api" }}{{ $root.Values.service.api.port }}{{ else }}{{ $root.Values.service.dependencies.port }}{{ end }}
+      {{- if eq $role "api" }}
+      nodePort: {{ $root.Values.service.api.nodePort }}
+      {{- end }}
+{{- end }}

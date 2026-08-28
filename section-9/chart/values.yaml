@@ -1,0 +1,58 @@
+replicaCount: 1
+
+image:
+  repository: 309-agentic-iac/inference-platform
+  tag: s9
+  pullPolicy: IfNotPresent
+
+service:
+  api:
+    type: NodePort
+    port: 8080
+    nodePort: 30080
+  dependencies:
+    type: ClusterIP
+    port: 8081
+
+backend:
+  url: http://inference-platform-dependencies:8081
+  # Seeded learner defect: generated token material must not live in values.
+  token: s9-course-token-committed
+
+resources:
+  dependencies:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  api:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+  worker:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
+probes:
+  readiness:
+    initialDelaySeconds: 1
+    periodSeconds: 3
+    timeoutSeconds: 1
+    failureThreshold: 3
+  liveness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    timeoutSeconds: 1
+    failureThreshold: 3
+
+# Disabled in the Kind core profile. Kind's default kindnet does not prove
+# NetworkPolicy enforcement; enabling these objects proves rendering only.
+networkPolicy:
+  enabled: false
+  enforcementNote: Rendered policy is not proof of enforcement; use a policy-capable CNI.
