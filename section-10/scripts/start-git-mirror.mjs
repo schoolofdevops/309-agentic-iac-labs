@@ -2,8 +2,8 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { FixtureError, READY_NAME, TASK_ID, TRANSPORT_SCOPE, loadMirrorState, parseCliArgs, reject } from "./prepare-git-mirror.mjs";
 
@@ -19,7 +19,7 @@ function rawCommand(executable, args, accepted = [0]) {
   if (!accepted.includes(result.status)) reject("COMMAND_FAILED", result.error?.message ?? result.stderr ?? result.stdout);
   return result;
 }
-function resolveTrustedTool(candidates, label, versionArgs, versionPattern) {
+function resolveTrustedTool(candidates, versionArgs, versionPattern) {
   for (const candidate of candidates) {
     if (!existsSync(candidate)) continue;
     const canonical = realpathSync(candidate);
@@ -28,12 +28,32 @@ function resolveTrustedTool(candidates, label, versionArgs, versionPattern) {
     const version = rawCommand(canonical, versionArgs, [0, 1]);
     if (version.status === 0 && versionPattern.test(`${version.stdout}${version.stderr}`)) return canonical;
   }
-  reject("TRUSTED_TOOL_MISSING", label);
+  return undefined;
+}
+
+const RANCHER_DESKTOP_CANONICAL_DOCKER = "/Applications/Rancher Desktop.app/Contents/Resources/resources/darwin/bin/docker";
+
+export function validateRancherDesktopMetadata(metadata) {
+  if (metadata.candidateBasename !== "docker" || metadata.canonicalBasename !== "docker" || !metadata.isRegularFile || metadata.ownerUid !== metadata.expectedUid || (metadata.mode & 0o111) === 0 || (metadata.mode & 0o022) !== 0) reject("TRUSTED_DOCKER_INVALID", metadata.canonicalPath);
+  if (metadata.isSymlink && metadata.canonicalPath !== RANCHER_DESKTOP_CANONICAL_DOCKER) reject("UNTRUSTED_DOCKER_SYMLINK", metadata.canonicalPath);
+}
+
+export function resolveRancherDesktopDocker({ homeDirectory = homedir() } = {}) {
+  const candidate = join(resolve(homeDirectory), ".rd", "bin", "docker");
+  if (basename(candidate) !== "docker" || !existsSync(candidate)) reject("TRUSTED_TOOL_MISSING", "Rancher Desktop docker");
+  const lexical = lstatSync(candidate);
+  const canonical = realpathSync(candidate);
+  const stats = lstatSync(canonical);
+  validateRancherDesktopMetadata({ candidateBasename: basename(candidate), canonicalBasename: basename(canonical), isRegularFile: stats.isFile(), isSymlink: lexical.isSymbolicLink(), canonicalPath: canonical, ownerUid: stats.uid, expectedUid: currentUid(), mode: stats.mode });
+  const version = rawCommand(canonical, ["--version"], [0, 1]);
+  if (version.status !== 0 || !/^Docker version \d+\.\d+\.\d+(?:-rd(?:\.\d+)?)?, build [A-Za-z0-9._+-]+\s*$/.test(version.stdout)) reject("TRUSTED_DOCKER_INVALID", "unexpected Rancher Desktop Docker version output");
+  return canonical;
 }
 
 export function productionRuntime() {
-  const dockerPath = resolveTrustedTool(["/opt/homebrew/bin/docker", "/usr/local/bin/docker", "/usr/bin/docker"], "docker", ["version", "--format", "{{.Client.Version}}"], /\d+\.\d+/);
-  const gitPath = resolveTrustedTool(["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"], "git", ["--version"], /^git version \d+\.\d+/);
+  const dockerPath = resolveTrustedTool(["/opt/homebrew/bin/docker", "/usr/local/bin/docker", "/usr/bin/docker"], ["--version"], /^Docker version \d+\.\d+\.\d+(?:[-+][A-Za-z0-9.]+)?, build [A-Za-z0-9._+-]+\s*$/) ?? resolveRancherDesktopDocker();
+  const gitPath = resolveTrustedTool(["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"], ["--version"], /^git version \d+\.\d+/);
+  if (!gitPath) reject("TRUSTED_TOOL_MISSING", "git");
   return {
     docker: (args, accepted = [0]) => rawCommand(dockerPath, args, accepted),
     git: (args, accepted = [0]) => rawCommand(gitPath, args, accepted),

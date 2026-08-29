@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { FixtureError } from "../scripts/prepare-git-mirror.mjs";
 import { DAEMON_COMMAND, IMAGE, startGitMirror } from "../scripts/start-git-mirror.mjs";
+import * as startModule from "../scripts/start-git-mirror.mjs";
 import { stopGitMirror } from "../scripts/stop-git-mirror.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -581,4 +582,61 @@ test("poisoned PATH Git and Docker tools never execute", () => {
   assert.notEqual(started.status, 0, "an invalid root stops before any Docker state inspection");
   assert.equal(existsSync(executed), false);
   cleanup(source.root, mirrorRoot, poisonRoot);
+});
+
+function makeRancherDesktopCandidate({ version = "Docker version 29.5.3-rd, build test", mode = 0o500, symlinkTarget } = {}) {
+  const home = mkdtempSync(join(tmpdir(), "agentic-iac-s10-rd-home-"));
+  const bin = join(home, ".rd", "bin");
+  mkdirSync(bin, { recursive: true });
+  const docker = join(bin, "docker");
+  if (symlinkTarget) symlinkSync(symlinkTarget, docker);
+  else {
+    writeFileSync(docker, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(`${version}\n`)})\n`);
+    chmodSync(docker, mode);
+  }
+  return { home, docker };
+}
+
+test("trusted Docker discovery accepts the canonical current-user Rancher Desktop CLI", () => {
+  assert.equal(typeof startModule.resolveRancherDesktopDocker, "function");
+  const fixture = makeRancherDesktopCandidate();
+  const resolved = startModule.resolveRancherDesktopDocker({ homeDirectory: fixture.home });
+  assert.equal(resolved, realpathSync(fixture.docker));
+  cleanup(fixture.home);
+});
+
+test("trusted Docker discovery resolves this host's supported Rancher Desktop CLI without daemon access", { skip: !existsSync(join(process.env.HOME ?? "", ".rd", "bin", "docker")) }, () => {
+  assert.equal(startModule.resolveRancherDesktopDocker(), realpathSync(join(process.env.HOME, ".rd", "bin", "docker")));
+});
+
+test("Rancher Desktop discovery rejects a writable or wrong-version Docker binary", () => {
+  assert.equal(typeof startModule.resolveRancherDesktopDocker, "function");
+  const writable = makeRancherDesktopCandidate({ mode: 0o777 });
+  assert.throws(() => startModule.resolveRancherDesktopDocker({ homeDirectory: writable.home }), (error) => error.code === "TRUSTED_DOCKER_INVALID");
+  const wrongVersion = makeRancherDesktopCandidate({ version: "podman version 5" });
+  assert.throws(() => startModule.resolveRancherDesktopDocker({ homeDirectory: wrongVersion.home }), (error) => error.code === "TRUSTED_DOCKER_INVALID");
+  cleanup(writable.home, wrongVersion.home);
+});
+
+test("Rancher Desktop discovery rejects an arbitrary symlink and wrong binary name", () => {
+  assert.equal(typeof startModule.resolveRancherDesktopDocker, "function");
+  const targetRoot = mkdtempSync(join(tmpdir(), "agentic-iac-s10-rd-target-"));
+  const target = join(targetRoot, "docker");
+  writeFileSync(target, `#!${process.execPath}\nprocess.stdout.write("29.5.3-rd\\n")\n`);
+  chmodSync(target, 0o500);
+  const linked = makeRancherDesktopCandidate({ symlinkTarget: target });
+  assert.throws(() => startModule.resolveRancherDesktopDocker({ homeDirectory: linked.home }), (error) => error.code === "UNTRUSTED_DOCKER_SYMLINK");
+
+  const wrongNameHome = mkdtempSync(join(tmpdir(), "agentic-iac-s10-rd-wrong-name-"));
+  mkdirSync(join(wrongNameHome, ".rd", "bin"), { recursive: true });
+  writeFileSync(join(wrongNameHome, ".rd", "bin", "podman"), `#!${process.execPath}\nprocess.stdout.write("29.5.3-rd\\n")\n`);
+  assert.throws(() => startModule.resolveRancherDesktopDocker({ homeDirectory: wrongNameHome }), (error) => error.code === "TRUSTED_TOOL_MISSING");
+  cleanup(targetRoot, linked.home, wrongNameHome);
+});
+
+test("Rancher Desktop metadata rejects a wrong owner and wrong canonical binary name", () => {
+  assert.equal(typeof startModule.validateRancherDesktopMetadata, "function");
+  const safe = { candidateBasename: "docker", canonicalBasename: "docker", isRegularFile: true, isSymlink: false, canonicalPath: "/safe/docker", ownerUid: 501, expectedUid: 501, mode: 0o755 };
+  assert.throws(() => startModule.validateRancherDesktopMetadata({ ...safe, ownerUid: 0 }), (error) => error.code === "TRUSTED_DOCKER_INVALID");
+  assert.throws(() => startModule.validateRancherDesktopMetadata({ ...safe, canonicalBasename: "podman" }), (error) => error.code === "TRUSTED_DOCKER_INVALID");
 });
