@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -87,7 +88,7 @@ export function productionRuntime() {
   const docker = (args, accepted = [0]) => rawCommand(dockerPath, args, accepted, dockerEnvironment);
   return {
     docker,
-    git: (args) => runGitProbe(docker, args),
+    git: (args, _accepted, expectedImageId, expectedImageLabels, expectedImageEnvironment) => runGitProbe(docker, args, { expectedImageEnvironment, expectedImageId, expectedImageLabels }),
   };
 }
 
@@ -98,53 +99,123 @@ function inspectOne(result, code) {
     return values[0];
   } catch (error) { if (error instanceof FixtureError) throw error; reject(code, error.message); }
 }
-function isExactContainerNotFound(result, name) { return result.status === 1 && new RegExp(`No such (?:object|container):?\\s*${name}`, "i").test(result.stderr ?? ""); }
+function escapeRegExp(value) { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+function isExactContainerNotFound(result, name) {
+  const escaped = escapeRegExp(name);
+  return result.status === 1 && new RegExp(`^(?:Error(?::| response from daemon:)?\\s*)?No such (?:object|container):?\\s*${escaped}\\s*$`, "i").test(result.stderr ?? "");
+}
 function isExactNotFound(result) { return isExactContainerNotFound(result, CONTAINER); }
 
-export function gitProbeDockerArgs(args) {
+export function gitProbeDockerArgs(args, nonce) {
   return [
-    "run", "--rm", `--name=${PROBE_CONTAINER}`, "--network=kind", "--read-only", "--cap-drop=ALL",
+    "create", "--rm", `--name=${PROBE_CONTAINER}`, "--network=kind", "--read-only", "--cap-drop=ALL",
     "--security-opt=no-new-privileges", "--user=65534:65534", "--pull=never",
     "--label=com.schoolofdevops.course=agentic-iac-s10", "--label=com.schoolofdevops.fixture=git-probe",
+    `--label=com.schoolofdevops.probe-nonce=${nonce}`,
     "--env=GIT_CONFIG=/dev/null", "--env=GIT_CONFIG_GLOBAL=/dev/null", "--env=GIT_CONFIG_NOSYSTEM=1",
     "--env=GIT_TERMINAL_PROMPT=0", "--env=HOME=/nonexistent",
     "--entrypoint=git", IMAGE, ...args,
   ];
 }
 
-function validateProbeContainer(container, args) {
+const PROBE_ENVIRONMENT = ["GIT_CONFIG=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "HOME=/nonexistent"];
+function environmentRecord(values) {
+  if (!Array.isArray(values)) return undefined;
+  const record = {};
+  for (const value of values) {
+    const separator = value.indexOf("=");
+    if (separator <= 0) return undefined;
+    const key = value.slice(0, separator);
+    if (Object.hasOwn(record, key)) return undefined;
+    record[key] = value.slice(separator + 1);
+  }
+  return record;
+}
+function expectedProbeEnvironment(imageEnvironment) {
+  const record = environmentRecord(imageEnvironment);
+  if (!record) return undefined;
+  for (const value of PROBE_ENVIRONMENT) {
+    const separator = value.indexOf("=");
+    record[value.slice(0, separator)] = value.slice(separator + 1);
+  }
+  return record;
+}
+function validateProbeContainer(container, expected) {
   const labels = container.Config?.Labels ?? {};
+  const expectedLabels = { ...expected.imageLabels, "com.schoolofdevops.course": "agentic-iac-s10", "com.schoolofdevops.fixture": "git-probe", "com.schoolofdevops.probe-nonce": expected.nonce };
   const valid =
-    container.Name === `/${PROBE_CONTAINER}` && container.Config?.Image === IMAGE &&
-    container.Config?.User === "65534:65534" && exactArray(container.Config?.Entrypoint, ["git"]) && exactArray(container.Config?.Cmd, args) &&
-    labels["com.schoolofdevops.course"] === "agentic-iac-s10" && labels["com.schoolofdevops.fixture"] === "git-probe" &&
-    container.HostConfig?.ReadonlyRootfs === true && exactArray(container.HostConfig?.CapDrop, ["ALL"]) &&
+    container.Id === expected.containerId && /^[0-9a-f]{64}$/.test(container.Id ?? "") &&
+    container.Image === expected.imageId && container.Name === `/${PROBE_CONTAINER}` && container.Config?.Image === IMAGE &&
+    container.Config?.User === "65534:65534" && exactArray(container.Config?.Entrypoint, ["git"]) && exactArray(container.Config?.Cmd, expected.args) && exactRecord(environmentRecord(container.Config?.Env) ?? {}, expectedProbeEnvironment(expected.imageEnvironment) ?? { invalid: true }) &&
+    exactRecord(labels, expectedLabels) &&
+    container.HostConfig?.AutoRemove === true && container.HostConfig?.Privileged === false && container.HostConfig?.ReadonlyRootfs === true && exactArray(container.HostConfig?.CapDrop, ["ALL"]) &&
     (container.HostConfig?.CapAdd == null || exactArray(container.HostConfig.CapAdd, [])) && exactArray(container.HostConfig?.SecurityOpt, ["no-new-privileges"]) &&
     container.HostConfig?.NetworkMode === "kind" && Array.isArray(container.Mounts) && container.Mounts.length === 0 &&
     exactArray(Object.keys(container.NetworkSettings?.Networks ?? {}), ["kind"]);
   if (!valid) reject("GIT_PROBE_OWNERSHIP_MISMATCH", `refusing to remove unowned ${PROBE_CONTAINER}`);
 }
 
-export function runGitProbe(docker, args) {
+function proveProbeNameAbsent(docker) {
+  const byName = docker(["container", "inspect", PROBE_CONTAINER], [0, 1]);
+  if (byName.status === 0) reject("GIT_PROBE_NAME_REUSED", `another container now owns ${PROBE_CONTAINER}`);
+  if (!isExactContainerNotFound(byName, PROBE_CONTAINER)) reject("GIT_PROBE_ABSENCE_UNPROVEN", "Docker did not prove exact probe-name absence");
+}
+
+function removeCapturedProbe(docker, expected) {
+  const immediatelyBeforeRemoval = docker(["container", "inspect", expected.containerId], [0, 1]);
+  if (immediatelyBeforeRemoval.status === 0) {
+    validateProbeContainer(inspectOne(immediatelyBeforeRemoval, "GIT_PROBE_OWNERSHIP_MISMATCH"), expected);
+    docker(["rm", "-f", expected.containerId]);
+  } else if (!isExactContainerNotFound(immediatelyBeforeRemoval, expected.containerId)) {
+    reject("GIT_PROBE_ABSENCE_UNPROVEN", "Docker did not prove captured probe absence");
+  }
+  const capturedAfter = docker(["container", "inspect", expected.containerId], [0, 1]);
+  if (!isExactContainerNotFound(capturedAfter, expected.containerId)) reject("GIT_PROBE_STILL_PRESENT", "Docker did not prove captured probe absence after cleanup");
+  proveProbeNameAbsent(docker);
+}
+
+export function runGitProbe(docker, args, { expectedImageEnvironment = [], expectedImageId, expectedImageLabels = {}, nonce = randomBytes(32).toString("hex") } = {}) {
+  if (!/^sha256:[0-9a-f]{64}$/.test(expectedImageId ?? "")) reject("GIT_PROBE_IMAGE_INVALID", "probe requires the inspected image ID");
+  if (!/^[0-9a-f]{64}$/.test(nonce)) reject("GIT_PROBE_NONCE_INVALID", "probe nonce must be 256-bit lowercase hex");
   const before = docker(["container", "inspect", PROBE_CONTAINER], [0, 1]);
   if (!isExactContainerNotFound(before, PROBE_CONTAINER)) reject(before.status === 0 ? "GIT_PROBE_EXISTS" : "GIT_PROBE_ABSENCE_UNPROVEN", "refusing to create over an unknown probe state");
+  let containerId;
+  try {
+    const created = docker(gitProbeDockerArgs(args, nonce));
+    containerId = created.stdout.trim();
+    if (!/^[0-9a-f]{64}$/.test(containerId)) reject("GIT_PROBE_ID_INVALID", "Docker create did not return a full container ID");
+  } catch (error) {
+    const uncertain = docker(["container", "inspect", PROBE_CONTAINER], [0, 1]);
+    if (uncertain.status === 0) {
+      const container = inspectOne(uncertain, "GIT_PROBE_OWNERSHIP_MISMATCH");
+      containerId = container.Id;
+      const expected = { args, containerId, imageEnvironment: expectedImageEnvironment, imageId: expectedImageId, imageLabels: expectedImageLabels, nonce };
+      validateProbeContainer(container, expected);
+      removeCapturedProbe(docker, expected);
+    } else if (!isExactContainerNotFound(uncertain, PROBE_CONTAINER)) {
+      reject("GIT_PROBE_ABSENCE_UNPROVEN", "Docker did not prove probe absence after create failed");
+    }
+    throw error;
+  }
+  const expected = { args, containerId, imageEnvironment: expectedImageEnvironment, imageId: expectedImageId, imageLabels: expectedImageLabels, nonce };
+  const createdResult = docker(["container", "inspect", containerId], [0, 1]);
+  if (createdResult.status !== 0) {
+    if (isExactContainerNotFound(createdResult, containerId)) {
+      proveProbeNameAbsent(docker);
+      reject("GIT_PROBE_DISAPPEARED", "captured probe disappeared before validation");
+    }
+    reject("GIT_PROBE_ABSENCE_UNPROVEN", "Docker did not return the captured probe for validation");
+  }
+  const createdContainer = inspectOne(createdResult, "GIT_PROBE_OWNERSHIP_MISMATCH");
+  validateProbeContainer(createdContainer, expected);
   let result;
   let commandError;
   try {
-    result = docker(gitProbeDockerArgs(args), Array.from({ length: 256 }, (_, code) => code));
+    result = docker(["start", "--attach", containerId], Array.from({ length: 256 }, (_, code) => code));
   } catch (error) {
     commandError = error;
   }
-  const after = docker(["container", "inspect", PROBE_CONTAINER], [0, 1]);
-  if (after.status === 0) {
-    const container = inspectOne(after, "GIT_PROBE_OWNERSHIP_MISMATCH");
-    validateProbeContainer(container, args);
-    docker(["rm", "-f", PROBE_CONTAINER]);
-    const removed = docker(["container", "inspect", PROBE_CONTAINER], [0, 1]);
-    if (!isExactContainerNotFound(removed, PROBE_CONTAINER)) reject("GIT_PROBE_STILL_PRESENT", "Docker did not prove probe absence after cleanup");
-  } else if (!isExactContainerNotFound(after, PROBE_CONTAINER)) {
-    reject("GIT_PROBE_ABSENCE_UNPROVEN", "Docker did not prove probe absence");
-  }
+  removeCapturedProbe(docker, expected);
   if (commandError) throw commandError;
   return result;
 }
@@ -167,7 +238,7 @@ function validateImage(runtime) {
     ![undefined, ""].includes(image.Config?.User) ||
     image.Config?.Volumes !== undefined
   ) reject("GIT_IMAGE_INVALID", "pinned image digest or frozen image config is invalid");
-  return { id: image.Id, labels: image.Config?.Labels ?? {} };
+  return { environment: image.Config?.Env ?? [], id: image.Id, labels: image.Config?.Labels ?? {} };
 }
 function exactArray(actual, expected) { return JSON.stringify(actual) === JSON.stringify(expected); }
 function exactRecord(actual, expected) { return JSON.stringify(Object.entries(actual).sort()) === JSON.stringify(Object.entries(expected).sort()); }
@@ -214,7 +285,7 @@ export function startGitMirror({ rootInput, runtime }) {
     const container = inspectOne(runtime.docker(["container", "inspect", CONTAINER]), "GIT_CONTAINER_INVALID");
     const ip = validateContainer(container, { containerId, imageId: image.id, imageLabels: image.labels, repository: prepared.repository, revision: prepared.marker.source_revision });
     const endpoint = `git://${ip}:9418/delivery.git`;
-    const probe = runtime.git(["ls-remote", endpoint, "refs/heads/main"], [0, 1]);
+    const probe = runtime.git(["ls-remote", endpoint, "refs/heads/main"], [0, 1], image.id, image.labels, image.environment);
     const expected = `${prepared.marker.source_revision}\trefs/heads/main`;
     if (probe.status !== 0 || probe.stdout.trim() !== expected) reject("REVISION_PROBE_FAILED", probe.stderr || `${probe.stdout.trim()} != ${expected}`);
     const ready = { container_id: containerId, container_name: CONTAINER, endpoint, prepared_marker_sha256: prepared.marker_sha256, record_version: 1, repository_manifest_sha256: prepared.marker.repository_manifest_sha256, repository_name: "delivery.git", source_revision: prepared.marker.source_revision, state: "READY", task_id: TASK_ID, transport_scope: TRANSPORT_SCOPE };

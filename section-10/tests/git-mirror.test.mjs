@@ -278,11 +278,13 @@ test("starts only the exact pinned, read-only, upload-pack-only daemon and prove
 
 test("production revision probes run inside the Kind network without mounts or mutable pulls", () => {
   const endpoint = "git://172.19.0.3:9418/delivery.git";
+  const nonce = "1".repeat(64);
   assert.equal(typeof startModule.gitProbeDockerArgs, "function");
-  assert.deepEqual(startModule.gitProbeDockerArgs(["ls-remote", endpoint, "refs/heads/main"]), [
-    "run", "--rm", "--name=agentic-iac-s10-git-probe", "--network=kind", "--read-only", "--cap-drop=ALL",
+  assert.deepEqual(startModule.gitProbeDockerArgs(["ls-remote", endpoint, "refs/heads/main"], nonce), [
+    "create", "--rm", "--name=agentic-iac-s10-git-probe", "--network=kind", "--read-only", "--cap-drop=ALL",
     "--security-opt=no-new-privileges", "--user=65534:65534", "--pull=never",
     "--label=com.schoolofdevops.course=agentic-iac-s10", "--label=com.schoolofdevops.fixture=git-probe",
+    `--label=com.schoolofdevops.probe-nonce=${nonce}`,
     "--env=GIT_CONFIG=/dev/null", "--env=GIT_CONFIG_GLOBAL=/dev/null", "--env=GIT_CONFIG_NOSYSTEM=1",
     "--env=GIT_TERMINAL_PROMPT=0", "--env=HOME=/nonexistent",
     "--entrypoint=git", image, "ls-remote", endpoint, "refs/heads/main",
@@ -291,28 +293,105 @@ test("production revision probes run inside the Kind network without mounts or m
 
 test("a failed production revision probe removes only its exact owned container and proves absence", () => {
   const args = ["ls-remote", "git://172.19.0.3:9418/delivery.git", "refs/heads/main"];
+  const nonce = "2".repeat(64);
+  const probeId = "d".repeat(64);
+  const imageId = `sha256:${"b".repeat(64)}`;
   const calls = [];
-  let inspectCount = 0;
   let removed = false;
   const docker = (commandArgs) => {
     calls.push(commandArgs);
     if (commandArgs[0] === "container" && commandArgs[1] === "inspect") {
-      inspectCount += 1;
-      if (inspectCount === 1 || removed) return { status: 1, stdout: "", stderr: "Error: No such container: agentic-iac-s10-git-probe" };
+      if (commandArgs[2] === "agentic-iac-s10-git-probe" || removed) return { status: 1, stdout: "", stderr: `Error: No such container: ${commandArgs[2]}` };
       return { status: 0, stdout: `${JSON.stringify([{
-        Name: "/agentic-iac-s10-git-probe",
-        Config: { Image: image, User: "65534:65534", Entrypoint: ["git"], Cmd: args, Labels: { "com.schoolofdevops.course": "agentic-iac-s10", "com.schoolofdevops.fixture": "git-probe" } },
-        HostConfig: { ReadonlyRootfs: true, CapDrop: ["ALL"], CapAdd: null, SecurityOpt: ["no-new-privileges"], NetworkMode: "kind" },
+        Id: probeId, Image: imageId, Name: "/agentic-iac-s10-git-probe",
+        Config: { Image: image, User: "65534:65534", Entrypoint: ["git"], Cmd: args, Env: ["GIT_CONFIG=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "HOME=/nonexistent"], Labels: { "com.schoolofdevops.course": "agentic-iac-s10", "com.schoolofdevops.fixture": "git-probe", "com.schoolofdevops.probe-nonce": nonce } },
+        HostConfig: { AutoRemove: true, Privileged: false, ReadonlyRootfs: true, CapDrop: ["ALL"], CapAdd: null, SecurityOpt: ["no-new-privileges"], NetworkMode: "kind" },
         Mounts: [], NetworkSettings: { Networks: { kind: { IPAddress: "172.19.0.4" } } },
       }])}\n`, stderr: "" };
     }
-    if (commandArgs[0] === "run") throw new FixtureError("COMMAND_FAILED", "probe timed out");
-    if (JSON.stringify(commandArgs) === JSON.stringify(["rm", "-f", "agentic-iac-s10-git-probe"])) { removed = true; return { status: 0, stdout: "agentic-iac-s10-git-probe\n", stderr: "" }; }
+    if (commandArgs[0] === "create") return { status: 0, stdout: `${probeId}\n`, stderr: "" };
+    if (commandArgs[0] === "start") throw new FixtureError("COMMAND_FAILED", "probe timed out");
+    if (JSON.stringify(commandArgs) === JSON.stringify(["rm", "-f", probeId])) { removed = true; return { status: 0, stdout: `${probeId}\n`, stderr: "" }; }
     throw new Error(`unexpected call ${JSON.stringify(commandArgs)}`);
   };
-  assert.throws(() => startModule.runGitProbe(docker, args), (error) => error.code === "COMMAND_FAILED");
-  assert.ok(calls.some((value) => JSON.stringify(value) === JSON.stringify(["rm", "-f", "agentic-iac-s10-git-probe"])));
-  assert.deepEqual(calls.at(-1), ["container", "inspect", "agentic-iac-s10-git-probe"]);
+  assert.throws(() => startModule.runGitProbe(docker, args, { expectedImageId: imageId, nonce }), (error) => error.code === "COMMAND_FAILED");
+  assert.ok(calls.some((value) => JSON.stringify(value) === JSON.stringify(["rm", "-f", probeId])));
+  assert.deepEqual(calls.slice(-2), [["container", "inspect", probeId], ["container", "inspect", "agentic-iac-s10-git-probe"]]);
+});
+
+test("probe cleanup rejects mutated ownership and runtime fields without deleting", () => {
+  const args = ["ls-remote", "git://172.19.0.3:9418/delivery.git", "refs/heads/main"];
+  const nonce = "3".repeat(64);
+  const probeId = "e".repeat(64);
+  const imageId = `sha256:${"b".repeat(64)}`;
+  const mutations = [
+    ["container ID", (value) => { value.Id = "f".repeat(64); }],
+    ["nonce", (value) => { value.Config.Labels["com.schoolofdevops.probe-nonce"] = "4".repeat(64); }],
+    ["extra label", (value) => { value.Config.Labels["attacker.example/owner"] = "forged"; }],
+    ["extra environment", (value) => { value.Config.Env.push("GIT_CONFIG=/attacker"); }],
+    ["auto-remove", (value) => { value.HostConfig.AutoRemove = false; }],
+    ["privileged", (value) => { value.HostConfig.Privileged = true; }],
+    ["image ID", (value) => { value.Image = `sha256:${"a".repeat(64)}`; }],
+    ["command", (value) => { value.Config.Cmd = ["status"]; }],
+    ["mount", (value) => { value.Mounts = [{ Type: "volume", Destination: "/data", RW: true }]; }],
+  ];
+  for (const [name, mutate] of mutations) {
+    const calls = [];
+    let inspectIdCount = 0;
+    const docker = (commandArgs) => {
+      calls.push(commandArgs);
+      if (commandArgs[0] === "container" && commandArgs[1] === "inspect" && commandArgs[2] === "agentic-iac-s10-git-probe") return { status: 1, stdout: "", stderr: "Error: No such container: agentic-iac-s10-git-probe" };
+      if (commandArgs[0] === "create") return { status: 0, stdout: `${probeId}\n`, stderr: "" };
+      if (commandArgs[0] === "container" && commandArgs[1] === "inspect" && commandArgs[2] === probeId) {
+        inspectIdCount += 1;
+        const value = { Id: probeId, Image: imageId, Name: "/agentic-iac-s10-git-probe", Config: { Image: image, User: "65534:65534", Entrypoint: ["git"], Cmd: args, Env: ["GIT_CONFIG=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "HOME=/nonexistent"], Labels: { "com.schoolofdevops.course": "agentic-iac-s10", "com.schoolofdevops.fixture": "git-probe", "com.schoolofdevops.probe-nonce": nonce } }, HostConfig: { AutoRemove: true, Privileged: false, ReadonlyRootfs: true, CapDrop: ["ALL"], CapAdd: null, SecurityOpt: ["no-new-privileges"], NetworkMode: "kind" }, Mounts: [], NetworkSettings: { Networks: { kind: { IPAddress: "172.19.0.4" } } } };
+        if (inspectIdCount === 2) mutate(value);
+        return { status: 0, stdout: `${JSON.stringify([value])}\n`, stderr: "" };
+      }
+      if (commandArgs[0] === "start") throw new FixtureError("COMMAND_FAILED", "probe timed out");
+      throw new Error(`unexpected call ${JSON.stringify(commandArgs)}`);
+    };
+    assert.throws(() => startModule.runGitProbe(docker, args, { expectedImageId: imageId, nonce }), (error) => error.code === "GIT_PROBE_OWNERSHIP_MISMATCH", name);
+    assert.equal(calls.some((value) => value[0] === "rm"), false, name);
+  }
+});
+
+test("probe cleanup never deletes a foreign name replacement after its captured ID disappears", () => {
+  const args = ["ls-remote", "git://172.19.0.3:9418/delivery.git", "refs/heads/main"];
+  const nonce = "5".repeat(64);
+  const probeId = "6".repeat(64);
+  const imageId = `sha256:${"b".repeat(64)}`;
+  let nameInspects = 0;
+  let idInspects = 0;
+  const calls = [];
+  const docker = (commandArgs) => {
+    calls.push(commandArgs);
+    if (commandArgs[0] === "container" && commandArgs[1] === "inspect" && commandArgs[2] === "agentic-iac-s10-git-probe") {
+      nameInspects += 1;
+      if (nameInspects === 1) return { status: 1, stdout: "", stderr: "Error: No such container: agentic-iac-s10-git-probe" };
+      return { status: 0, stdout: `${JSON.stringify([{ Id: "7".repeat(64), Name: "/agentic-iac-s10-git-probe" }])}\n`, stderr: "" };
+    }
+    if (commandArgs[0] === "create") return { status: 0, stdout: `${probeId}\n`, stderr: "" };
+    if (commandArgs[0] === "container" && commandArgs[1] === "inspect" && commandArgs[2] === probeId) {
+      idInspects += 1;
+      if (idInspects > 1) return { status: 1, stdout: "", stderr: `Error: No such container: ${probeId}` };
+      return { status: 0, stdout: `${JSON.stringify([{ Id: probeId, Image: imageId, Name: "/agentic-iac-s10-git-probe", Config: { Image: image, User: "65534:65534", Entrypoint: ["git"], Cmd: args, Env: ["GIT_CONFIG=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "HOME=/nonexistent"], Labels: { "com.schoolofdevops.course": "agentic-iac-s10", "com.schoolofdevops.fixture": "git-probe", "com.schoolofdevops.probe-nonce": nonce } }, HostConfig: { AutoRemove: true, Privileged: false, ReadonlyRootfs: true, CapDrop: ["ALL"], CapAdd: null, SecurityOpt: ["no-new-privileges"], NetworkMode: "kind" }, Mounts: [], NetworkSettings: { Networks: { kind: { IPAddress: "172.19.0.4" } } } }])}\n`, stderr: "" };
+    }
+    if (commandArgs[0] === "start") throw new FixtureError("COMMAND_FAILED", "probe timed out");
+    throw new Error(`unexpected call ${JSON.stringify(commandArgs)}`);
+  };
+  assert.throws(() => startModule.runGitProbe(docker, args, { expectedImageId: imageId, nonce }), (error) => error.code === "GIT_PROBE_NAME_REUSED");
+  assert.equal(calls.some((value) => value[0] === "rm"), false);
+});
+
+test("container absence matching rejects a suffixed probe name", () => {
+  const calls = [];
+  const docker = (commandArgs) => {
+    calls.push(commandArgs);
+    return { status: 1, stdout: "", stderr: "Error: No such container: agentic-iac-s10-git-probe-suffix" };
+  };
+  assert.throws(() => startModule.runGitProbe(docker, ["ls-remote"], { expectedImageId: `sha256:${"b".repeat(64)}`, nonce: "8".repeat(64) }), (error) => error.code === "GIT_PROBE_ABSENCE_UNPROVEN");
+  assert.equal(calls.some((value) => value[0] === "create"), false);
 });
 
 test("rejects an image that declares storage outside the exact repository bind", () => {
