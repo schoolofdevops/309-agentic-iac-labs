@@ -8,14 +8,15 @@ import { pathToFileURL } from "node:url";
 import { FixtureError, READY_NAME, TASK_ID, TRANSPORT_SCOPE, loadMirrorState, parseCliArgs, reject } from "./prepare-git-mirror.mjs";
 
 export const CONTAINER = "agentic-iac-s10-git";
+export const PROBE_CONTAINER = "agentic-iac-s10-git-probe";
 export const CLUSTER_NODE = "agentic-iac-s10-control-plane";
-export const IMAGE = "alpine/git@sha256:6f8eae2205a85c51106a9650e574a37fb1d5e4f645e5f6ea57cb57b9462cd4cf";
-export const DAEMON_COMMAND = ["daemon", "--reuseaddr", "--verbose", "--export-all", "--base-path=/git", "--port=9418", "--listen=0.0.0.0", "--enable=upload-pack", "--disable=receive-pack", "--disable=upload-archive", "/git/delivery.git"];
+export const IMAGE = "bitnami/git@sha256:972d6f1ac0e2b62f689794c56620f75d18f22be8f1069554a7622622e5bed548";
+export const DAEMON_COMMAND = ["-c", "safe.directory=/git/delivery.git", "daemon", "--reuseaddr", "--verbose", "--export-all", "--base-path=/git", "--port=9418", "--listen=0.0.0.0", "--enable=upload-pack", "--disable=receive-pack", "--disable=upload-archive", "/git/delivery.git"];
 
 function minimalEnvironment() { return { GIT_CONFIG: "/dev/null", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", HOME: realpathSync(tmpdir()), LANG: "C", LC_ALL: "C", PATH: "/usr/bin:/bin" }; }
 function currentUid() { return typeof process.getuid === "function" ? process.getuid() : statSync(realpathSync(tmpdir())).uid; }
-function rawCommand(executable, args, accepted = [0]) {
-  const result = spawnSync(executable, args, { encoding: "utf8", shell: false, env: minimalEnvironment(), timeout: 60_000, killSignal: "SIGKILL" });
+function rawCommand(executable, args, accepted = [0], environment = {}) {
+  const result = spawnSync(executable, args, { encoding: "utf8", shell: false, env: { ...minimalEnvironment(), ...environment }, timeout: 60_000, killSignal: "SIGKILL" });
   if (!accepted.includes(result.status)) reject("COMMAND_FAILED", result.error?.message ?? result.stderr ?? result.stdout);
   return result;
 }
@@ -55,13 +56,38 @@ export function resolveRancherDesktopDocker() {
   return canonical;
 }
 
+export function validateRancherDesktopSocketMetadata(metadata) {
+  if (
+    metadata.canonicalPath !== metadata.expectedPath ||
+    metadata.isSymlink ||
+    !metadata.isSocket ||
+    metadata.ownerUid !== metadata.expectedUid ||
+    (metadata.mode & 0o077) !== 0
+  ) reject("TRUSTED_DOCKER_SOCKET_INVALID", metadata.canonicalPath);
+}
+
+export function resolveRancherDesktopDockerHost() {
+  const expected = join(resolve(userInfo().homedir), ".rd", "docker.sock");
+  if (!existsSync(expected)) reject("TRUSTED_DOCKER_SOCKET_MISSING", expected);
+  const lexical = lstatSync(expected);
+  const canonical = realpathSync(expected);
+  const stats = lstatSync(canonical);
+  validateRancherDesktopSocketMetadata({ canonicalPath: canonical, expectedPath: expected, isSocket: stats.isSocket(), isSymlink: lexical.isSymbolicLink(), ownerUid: stats.uid, expectedUid: currentUid(), mode: stats.mode });
+  return `unix://${canonical}`;
+}
+
 export function productionRuntime() {
-  const dockerPath = resolveTrustedTool(["/opt/homebrew/bin/docker", "/usr/local/bin/docker", "/usr/bin/docker"], ["--version"], /^Docker version \d+\.\d+\.\d+(?:[-+][A-Za-z0-9.]+)?, build [A-Za-z0-9._+-]+\s*$/) ?? resolveRancherDesktopDocker();
-  const gitPath = resolveTrustedTool(["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"], ["--version"], /^git version \d+\.\d+/);
-  if (!gitPath) reject("TRUSTED_TOOL_MISSING", "git");
+  const rancherCandidate = join(resolve(userInfo().homedir), ".rd", "bin", "docker");
+  const useRancherDesktop = process.platform === "darwin" && existsSync(rancherCandidate);
+  const dockerPath = useRancherDesktop
+    ? resolveRancherDesktopDocker()
+    : resolveTrustedTool(["/opt/homebrew/bin/docker", "/usr/local/bin/docker", "/usr/bin/docker"], ["--version"], /^Docker version \d+\.\d+\.\d+(?:[-+][A-Za-z0-9.]+)?, build [A-Za-z0-9._+-]+\s*$/);
+  if (!dockerPath) reject("TRUSTED_TOOL_MISSING", "docker");
+  const dockerEnvironment = useRancherDesktop ? { DOCKER_HOST: resolveRancherDesktopDockerHost() } : {};
+  const docker = (args, accepted = [0]) => rawCommand(dockerPath, args, accepted, dockerEnvironment);
   return {
-    docker: (args, accepted = [0]) => rawCommand(dockerPath, args, accepted),
-    git: (args, accepted = [0]) => rawCommand(gitPath, args, accepted),
+    docker,
+    git: (args) => runGitProbe(docker, args),
   };
 }
 
@@ -72,7 +98,56 @@ function inspectOne(result, code) {
     return values[0];
   } catch (error) { if (error instanceof FixtureError) throw error; reject(code, error.message); }
 }
-function isExactNotFound(result) { return result.status === 1 && /No such (?:object|container):?\s*agentic-iac-s10-git/i.test(result.stderr ?? ""); }
+function isExactContainerNotFound(result, name) { return result.status === 1 && new RegExp(`No such (?:object|container):?\\s*${name}`, "i").test(result.stderr ?? ""); }
+function isExactNotFound(result) { return isExactContainerNotFound(result, CONTAINER); }
+
+export function gitProbeDockerArgs(args) {
+  return [
+    "run", "--rm", `--name=${PROBE_CONTAINER}`, "--network=kind", "--read-only", "--cap-drop=ALL",
+    "--security-opt=no-new-privileges", "--user=65534:65534", "--pull=never",
+    "--label=com.schoolofdevops.course=agentic-iac-s10", "--label=com.schoolofdevops.fixture=git-probe",
+    "--env=GIT_CONFIG=/dev/null", "--env=GIT_CONFIG_GLOBAL=/dev/null", "--env=GIT_CONFIG_NOSYSTEM=1",
+    "--env=GIT_TERMINAL_PROMPT=0", "--env=HOME=/nonexistent",
+    "--entrypoint=git", IMAGE, ...args,
+  ];
+}
+
+function validateProbeContainer(container, args) {
+  const labels = container.Config?.Labels ?? {};
+  const valid =
+    container.Name === `/${PROBE_CONTAINER}` && container.Config?.Image === IMAGE &&
+    container.Config?.User === "65534:65534" && exactArray(container.Config?.Entrypoint, ["git"]) && exactArray(container.Config?.Cmd, args) &&
+    labels["com.schoolofdevops.course"] === "agentic-iac-s10" && labels["com.schoolofdevops.fixture"] === "git-probe" &&
+    container.HostConfig?.ReadonlyRootfs === true && exactArray(container.HostConfig?.CapDrop, ["ALL"]) &&
+    (container.HostConfig?.CapAdd == null || exactArray(container.HostConfig.CapAdd, [])) && exactArray(container.HostConfig?.SecurityOpt, ["no-new-privileges"]) &&
+    container.HostConfig?.NetworkMode === "kind" && Array.isArray(container.Mounts) && container.Mounts.length === 0 &&
+    exactArray(Object.keys(container.NetworkSettings?.Networks ?? {}), ["kind"]);
+  if (!valid) reject("GIT_PROBE_OWNERSHIP_MISMATCH", `refusing to remove unowned ${PROBE_CONTAINER}`);
+}
+
+export function runGitProbe(docker, args) {
+  const before = docker(["container", "inspect", PROBE_CONTAINER], [0, 1]);
+  if (!isExactContainerNotFound(before, PROBE_CONTAINER)) reject(before.status === 0 ? "GIT_PROBE_EXISTS" : "GIT_PROBE_ABSENCE_UNPROVEN", "refusing to create over an unknown probe state");
+  let result;
+  let commandError;
+  try {
+    result = docker(gitProbeDockerArgs(args), Array.from({ length: 256 }, (_, code) => code));
+  } catch (error) {
+    commandError = error;
+  }
+  const after = docker(["container", "inspect", PROBE_CONTAINER], [0, 1]);
+  if (after.status === 0) {
+    const container = inspectOne(after, "GIT_PROBE_OWNERSHIP_MISMATCH");
+    validateProbeContainer(container, args);
+    docker(["rm", "-f", PROBE_CONTAINER]);
+    const removed = docker(["container", "inspect", PROBE_CONTAINER], [0, 1]);
+    if (!isExactContainerNotFound(removed, PROBE_CONTAINER)) reject("GIT_PROBE_STILL_PRESENT", "Docker did not prove probe absence after cleanup");
+  } else if (!isExactContainerNotFound(after, PROBE_CONTAINER)) {
+    reject("GIT_PROBE_ABSENCE_UNPROVEN", "Docker did not prove probe absence");
+  }
+  if (commandError) throw commandError;
+  return result;
+}
 
 export function removeContainerAndProveAbsent(runtime) {
   runtime.docker(["rm", "-f", CONTAINER]);
@@ -82,7 +157,16 @@ export function removeContainerAndProveAbsent(runtime) {
 
 function validateImage(runtime) {
   const image = inspectOne(runtime.docker(["image", "inspect", IMAGE]), "GIT_IMAGE_INVALID");
-  if (!/^sha256:[0-9a-f]{64}$/.test(image.Id ?? "") || !Array.isArray(image.RepoDigests) || !image.RepoDigests.includes(IMAGE) || !exactArray(image.Config?.Entrypoint, ["git"]) || !exactArray(image.Config?.Cmd, ["--help"]) || image.Config?.WorkingDir !== "/git" || ![undefined, ""].includes(image.Config?.User)) reject("GIT_IMAGE_INVALID", "pinned image digest or frozen image config is invalid");
+  if (
+    !/^sha256:[0-9a-f]{64}$/.test(image.Id ?? "") ||
+    !Array.isArray(image.RepoDigests) || !image.RepoDigests.includes(IMAGE) ||
+    !["amd64", "arm64"].includes(image.Architecture) ||
+    !exactArray(image.Config?.Entrypoint, ["/opt/bitnami/scripts/git/entrypoint.sh"]) ||
+    !exactArray(image.Config?.Cmd, ["/bin/bash"]) ||
+    image.Config?.WorkingDir !== "/" ||
+    ![undefined, ""].includes(image.Config?.User) ||
+    image.Config?.Volumes !== undefined
+  ) reject("GIT_IMAGE_INVALID", "pinned image digest or frozen image config is invalid");
   return { id: image.Id, labels: image.Config?.Labels ?? {} };
 }
 function exactArray(actual, expected) { return JSON.stringify(actual) === JSON.stringify(expected); }

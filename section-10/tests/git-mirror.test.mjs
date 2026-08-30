@@ -28,7 +28,7 @@ const sectionRoot = join(here, "..");
 const prepare = join(sectionRoot, "scripts", "prepare-git-mirror.mjs");
 const start = join(sectionRoot, "scripts", "start-git-mirror.mjs");
 const stop = join(sectionRoot, "scripts", "stop-git-mirror.mjs");
-const image = "alpine/git@sha256:6f8eae2205a85c51106a9650e574a37fb1d5e4f645e5f6ea57cb57b9462cd4cf";
+const image = "bitnami/git@sha256:972d6f1ac0e2b62f689794c56620f75d18f22be8f1069554a7622622e5bed548";
 
 function command(executable, args, options = {}) {
   return spawnSync(executable, args, { encoding: "utf8", shell: false, ...options });
@@ -117,7 +117,17 @@ function makeFakeRuntime({ network = true, node = true, existing = false, probeR
         return result(0, `${JSON.stringify([container()])}\n`, "", accepted);
       }
       if (args[0] === "image" && args[1] === "inspect") {
-        const value = { Id: imageId, RepoDigests: [IMAGE], Config: { Entrypoint: ["git"], Cmd: ["--help"], WorkingDir: "/git", Labels: imageLabels } };
+        const value = {
+          Architecture: "arm64",
+          Id: imageId,
+          RepoDigests: [IMAGE],
+          Config: {
+            Entrypoint: ["/opt/bitnami/scripts/git/entrypoint.sh"],
+            Cmd: ["/bin/bash"],
+            WorkingDir: "/",
+            Labels: imageLabels,
+          },
+        };
         if (mutateImage) mutateImage(value);
         return result(0, `${JSON.stringify([value])}\n`, "", accepted);
       }
@@ -258,10 +268,65 @@ test("starts only the exact pinned, read-only, upload-pack-only daemon and prove
   assert.ok(run.some((arg) => arg.startsWith("--mount=type=bind,") && arg.endsWith(",readonly")));
   assert.ok(run.includes("--entrypoint=git"));
   assert.ok(run.includes(image));
+  assert.deepEqual(run.slice(run.indexOf(image) + 1, run.indexOf(image) + 3), ["-c", "safe.directory=/git/delivery.git"]);
   assert.ok(run.includes("daemon"));
   assert.ok(run.includes("--enable=upload-pack"));
   assert.ok(run.includes("--disable=receive-pack"));
   assert.ok(run.includes("--disable=upload-archive"));
+  cleanup(source.root, mirror.root, runtime.root);
+});
+
+test("production revision probes run inside the Kind network without mounts or mutable pulls", () => {
+  const endpoint = "git://172.19.0.3:9418/delivery.git";
+  assert.equal(typeof startModule.gitProbeDockerArgs, "function");
+  assert.deepEqual(startModule.gitProbeDockerArgs(["ls-remote", endpoint, "refs/heads/main"]), [
+    "run", "--rm", "--name=agentic-iac-s10-git-probe", "--network=kind", "--read-only", "--cap-drop=ALL",
+    "--security-opt=no-new-privileges", "--user=65534:65534", "--pull=never",
+    "--label=com.schoolofdevops.course=agentic-iac-s10", "--label=com.schoolofdevops.fixture=git-probe",
+    "--env=GIT_CONFIG=/dev/null", "--env=GIT_CONFIG_GLOBAL=/dev/null", "--env=GIT_CONFIG_NOSYSTEM=1",
+    "--env=GIT_TERMINAL_PROMPT=0", "--env=HOME=/nonexistent",
+    "--entrypoint=git", image, "ls-remote", endpoint, "refs/heads/main",
+  ]);
+});
+
+test("a failed production revision probe removes only its exact owned container and proves absence", () => {
+  const args = ["ls-remote", "git://172.19.0.3:9418/delivery.git", "refs/heads/main"];
+  const calls = [];
+  let inspectCount = 0;
+  let removed = false;
+  const docker = (commandArgs) => {
+    calls.push(commandArgs);
+    if (commandArgs[0] === "container" && commandArgs[1] === "inspect") {
+      inspectCount += 1;
+      if (inspectCount === 1 || removed) return { status: 1, stdout: "", stderr: "Error: No such container: agentic-iac-s10-git-probe" };
+      return { status: 0, stdout: `${JSON.stringify([{
+        Name: "/agentic-iac-s10-git-probe",
+        Config: { Image: image, User: "65534:65534", Entrypoint: ["git"], Cmd: args, Labels: { "com.schoolofdevops.course": "agentic-iac-s10", "com.schoolofdevops.fixture": "git-probe" } },
+        HostConfig: { ReadonlyRootfs: true, CapDrop: ["ALL"], CapAdd: null, SecurityOpt: ["no-new-privileges"], NetworkMode: "kind" },
+        Mounts: [], NetworkSettings: { Networks: { kind: { IPAddress: "172.19.0.4" } } },
+      }])}\n`, stderr: "" };
+    }
+    if (commandArgs[0] === "run") throw new FixtureError("COMMAND_FAILED", "probe timed out");
+    if (JSON.stringify(commandArgs) === JSON.stringify(["rm", "-f", "agentic-iac-s10-git-probe"])) { removed = true; return { status: 0, stdout: "agentic-iac-s10-git-probe\n", stderr: "" }; }
+    throw new Error(`unexpected call ${JSON.stringify(commandArgs)}`);
+  };
+  assert.throws(() => startModule.runGitProbe(docker, args), (error) => error.code === "COMMAND_FAILED");
+  assert.ok(calls.some((value) => JSON.stringify(value) === JSON.stringify(["rm", "-f", "agentic-iac-s10-git-probe"])));
+  assert.deepEqual(calls.at(-1), ["container", "inspect", "agentic-iac-s10-git-probe"]);
+});
+
+test("rejects an image that declares storage outside the exact repository bind", () => {
+  const source = makeSource();
+  const mirror = prepareMirror(source);
+  assert.equal(mirror.status, 0, mirror.stderr);
+  const runtime = makeFakeRuntime({
+    probeRevision: source.head,
+    mutateImage: (value) => { value.Config.Volumes = { "/git": {} }; },
+  });
+  const result = startMirror(mirror, runtime);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /GIT_IMAGE_INVALID/);
+  assert.equal(dockerCalls(runtime).some((args) => args[0] === "run"), false);
   cleanup(source.root, mirror.root, runtime.root);
 });
 
@@ -589,12 +654,31 @@ function rancherDesktopMetadata(overrides = {}) {
   return { candidateBasename: "docker", canonicalBasename: "docker", isRegularFile: true, isSymlink: true, canonicalPath: "/Applications/Rancher Desktop.app/Contents/Resources/resources/darwin/bin/docker", ownerUid: uid, expectedUid: uid, mode: 0o755, ...overrides };
 }
 
+function rancherDesktopSocketMetadata(overrides = {}) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  return { canonicalPath: join(userInfo().homedir, ".rd", "docker.sock"), expectedPath: join(userInfo().homedir, ".rd", "docker.sock"), isSocket: true, isSymlink: false, ownerUid: uid, expectedUid: uid, mode: 0o600, ...overrides };
+}
+
 test("trusted Docker metadata accepts only the exact canonical current-user Rancher Desktop symlink", () => {
   assert.doesNotThrow(() => startModule.validateRancherDesktopMetadata(rancherDesktopMetadata()));
 });
 
 test("trusted Docker discovery resolves this host's supported Rancher Desktop symlink without daemon access", { skip: !existsSync(join(userInfo().homedir, ".rd", "bin", "docker")) }, () => {
   assert.equal(startModule.resolveRancherDesktopDocker(), realpathSync(join(userInfo().homedir, ".rd", "bin", "docker")));
+});
+
+test("trusted Rancher Docker binds only the exact current-user socket", () => {
+  assert.equal(typeof startModule.validateRancherDesktopSocketMetadata, "function");
+  assert.doesNotThrow(() => startModule.validateRancherDesktopSocketMetadata(rancherDesktopSocketMetadata()));
+  assert.throws(() => startModule.validateRancherDesktopSocketMetadata(rancherDesktopSocketMetadata({ isSocket: false })), (error) => error.code === "TRUSTED_DOCKER_SOCKET_INVALID");
+  assert.throws(() => startModule.validateRancherDesktopSocketMetadata(rancherDesktopSocketMetadata({ isSymlink: true })), (error) => error.code === "TRUSTED_DOCKER_SOCKET_INVALID");
+  assert.throws(() => startModule.validateRancherDesktopSocketMetadata(rancherDesktopSocketMetadata({ ownerUid: 0 })), (error) => error.code === "TRUSTED_DOCKER_SOCKET_INVALID");
+  assert.throws(() => startModule.validateRancherDesktopSocketMetadata(rancherDesktopSocketMetadata({ mode: 0o622 })), (error) => error.code === "TRUSTED_DOCKER_SOCKET_INVALID");
+  assert.throws(() => startModule.validateRancherDesktopSocketMetadata(rancherDesktopSocketMetadata({ canonicalPath: "/tmp/attacker.sock" })), (error) => error.code === "TRUSTED_DOCKER_SOCKET_INVALID");
+});
+
+test("trusted Rancher Docker resolves this host's socket without caller HOME or context", { skip: !existsSync(join(userInfo().homedir, ".rd", "docker.sock")) }, () => {
+  assert.equal(startModule.resolveRancherDesktopDockerHost(), `unix://${realpathSync(join(userInfo().homedir, ".rd", "docker.sock"))}`);
 });
 
 test("Rancher Desktop discovery rejects a writable or wrong-version Docker binary", () => {
