@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,8 @@ import test from "node:test";
 import {
   EXACT,
   assertApprovedRevision,
+  assertApprovalUnchanged,
+  assertLaterApprovalsAbsent,
   assertApplicationContract,
   assertRuntimeNames,
   commandEnvironment,
@@ -18,6 +20,8 @@ import {
   transportTagFor,
   normalizeNodeImageReference,
   recordPeak,
+  verifyRevisionLineage,
+  waitForApprovedRevision,
   workloadRolloutTargets,
 } from "../scripts/run-gitops-lifecycle.mjs";
 
@@ -75,9 +79,99 @@ test("approval binds independent human reviewer to one exact revision and purpos
     purpose: "promote-v1",
     approved: true,
   })}\n`);
-  assert.doesNotThrow(() => assertApprovedRevision(path, revision, "promote-v1"));
+  const approved = assertApprovedRevision(path, revision, "promote-v1");
+  assert.deepEqual(Object.keys(approved).sort(), ["approved", "approved_by", "file", "purpose", "requested_by", "revision", "schema"].sort());
+  assert.deepEqual(Object.keys(approved.file).sort(), ["birthtime", "bytes", "ctime", "device", "identity_sha256", "inode", "mtime"].sort());
   assert.throws(() => assertApprovedRevision(path, "2".repeat(40), "promote-v1"), /UNAPPROVED_REVISION/);
   assert.throws(() => assertApprovedRevision(path, revision, "promote-v2"), /APPROVAL_PURPOSE_MISMATCH/);
+  rmSync(root, { recursive: true });
+});
+
+test("approval schema rejects extra token or path keys and never serializes them", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-approval-schema-"));
+  const path = join(root, "approval.json");
+  const base = { schema: "agentic-iac-s10-human-approval/v1", approved_by: "human-platform-reviewer", requested_by: "agent-author", revision: "3".repeat(40), purpose: "promote-v2", approved: true };
+  for (const extra of [{ token: "must-not-survive" }, { local_path: "/must/not/survive" }]) {
+    writeFileSync(path, `${JSON.stringify({ ...base, ...extra })}\n`, { mode: 0o600 });
+    assert.throws(() => assertApprovedRevision(path, base.revision, base.purpose), /APPROVAL_KEYS_INVALID/);
+  }
+  writeFileSync(path, `${JSON.stringify(base)}\n`, { mode: 0o600 });
+  const evidence = assertApprovedRevision(path, base.revision, base.purpose);
+  assert.doesNotMatch(JSON.stringify(evidence), /must-not-survive|must\/not\/survive|local_path|token/);
+  rmSync(root, { recursive: true });
+});
+
+test("later approvals must be absent initially and a newly created exact record advances after its gate", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-late-approval-"));
+  const v2 = join(root, "v2.json");
+  const revert = join(root, "revert.json");
+  const revision = "4".repeat(40);
+  for (const preloaded of [v2, revert]) {
+    writeFileSync(preloaded, "{}\n", { mode: 0o600 });
+    assert.throws(() => assertLaterApprovalsAbsent([v2, revert]), /PRELOADED_LATER_APPROVAL/);
+    rmSync(preloaded);
+  }
+  assert.doesNotThrow(() => assertLaterApprovalsAbsent([v2, revert]));
+  const gateMs = Date.now();
+  setTimeout(() => writeFileSync(v2, `${JSON.stringify({ schema: "agentic-iac-s10-human-approval/v1", approved_by: "human-platform-reviewer", requested_by: "agent-author", revision, purpose: "promote-v2", approved: true })}\n`, { mode: 0o600 }), 20);
+  const observed = await waitForApprovedRevision(v2, revision, "promote-v2", { gateMs, timeoutMs: 500, pollMs: 5 });
+  assert.equal(observed.revision, revision);
+  assert.ok(Date.parse(observed.file.mtime) >= gateMs);
+  assert.match(observed.file.identity_sha256, /^[0-9a-f]{64}$/);
+  rmSync(root, { recursive: true });
+});
+
+test("approval acceptance does not depend on Linux filesystems reporting birth time", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-zero-birthtime-"));
+  const path = join(root, "approval.json");
+  const value = { schema: "agentic-iac-s10-human-approval/v1", approved_by: "human-platform-reviewer", requested_by: "agent-author", revision: "5".repeat(40), purpose: "promote-v2", approved: true };
+  writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  const real = lstatSync(path);
+  const linuxStyleStat = () => new Proxy(real, { get: (target, key) => key === "birthtimeMs" ? 0 : key === "birthtime" ? new Date(0) : Reflect.get(target, key, target) });
+  const approved = assertApprovedRevision(path, value.revision, value.purpose, { stat: linuxStyleStat });
+  assert.equal(approved.file.birthtime, null);
+  assert.match(approved.file.identity_sha256, /^[0-9a-f]{64}$/);
+  rmSync(root, { recursive: true });
+});
+
+test("an accepted approval must remain byte-identical until the explicit sync", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-approval-recheck-"));
+  const path = join(root, "approval.json");
+  const value = { schema: "agentic-iac-s10-human-approval/v1", approved_by: "human-platform-reviewer", requested_by: "agent-author", revision: "6".repeat(40), purpose: "promote-v2", approved: true };
+  writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  const accepted = assertApprovedRevision(path, value.revision, value.purpose);
+  assert.doesNotThrow(() => assertApprovalUnchanged(path, value.revision, value.purpose, accepted));
+  writeFileSync(path, `${JSON.stringify({ ...value, approved: false })}\n`, { mode: 0o600 });
+  assert.throws(() => assertApprovalUnchanged(path, value.revision, value.purpose, accepted), /APPROVAL_CHANGED_AFTER_ACCEPTANCE|APPROVAL_RECORD_INVALID/);
+  rmSync(root, { recursive: true });
+});
+
+test("revision lineage requires direct v1-v2-recovery ancestry and a true tree recovery", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-lineage-"));
+  spawnSync("git", ["init", "-q", root]);
+  spawnSync("git", ["-C", root, "config", "user.name", "Lifecycle Test"]);
+  spawnSync("git", ["-C", root, "config", "user.email", "lifecycle@example.invalid"]);
+  writeFileSync(join(root, "version.txt"), "v1\n");
+  spawnSync("git", ["-C", root, "add", "."]); spawnSync("git", ["-C", root, "commit", "-qm", "v1"]);
+  const v1 = spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  writeFileSync(join(root, "version.txt"), "v2\n");
+  spawnSync("git", ["-C", root, "add", "."]); spawnSync("git", ["-C", root, "commit", "-qm", "v2"]);
+  const v2 = spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  spawnSync("git", ["-C", root, "revert", "--no-edit", v2]);
+  const recovery = spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  const lineage = verifyRevisionLineage(root, { v1, v2, revert: recovery }, []);
+  assert.equal(lineage.v2.parent, v1);
+  assert.equal(lineage.recovery.parent, v2);
+  assert.equal(lineage.recovery.tree, lineage.v1.tree);
+  assert.notEqual(lineage.v2.tree, lineage.v1.tree);
+  assert.match(lineage.v1_to_v2.patch_sha256, /^[0-9a-f]{64}$/);
+  spawnSync("git", ["-C", root, "checkout", "-q", "--orphan", "unrelated"]);
+  rmSync(join(root, "version.txt"));
+  mkdirSync(join(root, "branch"));
+  writeFileSync(join(root, "branch", "other.txt"), "other\n");
+  spawnSync("git", ["-C", root, "add", "."]); spawnSync("git", ["-C", root, "commit", "-qm", "unrelated"]);
+  const unrelated = spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  assert.throws(() => verifyRevisionLineage(root, { v1, v2: unrelated, revert: recovery }, []), /V2_NOT_DIRECT_SUCCESSOR/);
   rmSync(root, { recursive: true });
 });
 

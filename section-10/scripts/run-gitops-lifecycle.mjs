@@ -2,7 +2,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -40,17 +40,73 @@ export function assertApplicationContract(manifest) {
   return true;
 }
 
-export function assertApprovedRevision(path, revision, purpose) {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o022) !== 0) fail("APPROVAL_RECORD_INVALID");
-  const value = JSON.parse(readFileSync(path, "utf8"));
+export function assertApprovedRevision(path, revision, purpose, { stat = lstatSync, read = readFileSync } = {}) {
+  const before = stat(path);
+  if (!before.isFile() || before.isSymbolicLink() || (before.mode & 0o022) !== 0) fail("APPROVAL_RECORD_INVALID");
+  const raw = read(path, "utf8");
+  const value = JSON.parse(raw);
+  const allowedKeys = ["approved", "approved_by", "purpose", "requested_by", "revision", "schema"];
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(allowedKeys)) fail("APPROVAL_KEYS_INVALID");
   if (value.schema !== "agentic-iac-s10-human-approval/v1"
     || value.approved !== true
     || value.approved_by !== "human-platform-reviewer"
     || value.requested_by !== "agent-author") fail("APPROVAL_RECORD_INVALID");
   if (value.revision !== revision) fail("UNAPPROVED_REVISION");
   if (value.purpose !== purpose) fail("APPROVAL_PURPOSE_MISMATCH");
-  return value;
+  const after = stat(path);
+  if (!after.isFile() || after.isSymbolicLink()
+    || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+    || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) fail("APPROVAL_RECORD_CHANGED_DURING_READ");
+  const trustworthyBirthtime = Number.isFinite(after.birthtimeMs) && after.birthtimeMs > 0;
+  return {
+    schema: value.schema,
+    approved_by: value.approved_by,
+    requested_by: value.requested_by,
+    revision: value.revision,
+    purpose: value.purpose,
+    approved: value.approved,
+    file: {
+      device: String(after.dev),
+      inode: String(after.ino),
+      bytes: after.size,
+      birthtime: trustworthyBirthtime ? after.birthtime.toISOString() : null,
+      ctime: after.ctime.toISOString(),
+      mtime: after.mtime.toISOString(),
+      identity_sha256: sha256(raw),
+    },
+  };
+}
+
+export function assertLaterApprovalsAbsent(paths) {
+  const preloaded = paths.filter((path) => existsSync(path));
+  if (preloaded.length) fail("PRELOADED_LATER_APPROVAL", String(preloaded.length));
+}
+
+export async function waitForApprovedRevision(path, revision, purpose, { gateMs, timeoutMs = 300_000, pollMs = 250, now = Date.now, sleep = delay } = {}) {
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    if (existsSync(path)) {
+      const approved = assertApprovedRevision(path, revision, purpose);
+      if (Date.parse(approved.file.ctime) < gateMs || Date.parse(approved.file.mtime) < gateMs) fail("APPROVAL_PREDATES_GATE");
+      return approved;
+    }
+    await sleep(pollMs);
+  }
+  fail("APPROVAL_WAIT_TIMEOUT", purpose);
+}
+
+export function assertApprovalUnchanged(path, revision, purpose, accepted) {
+  const current = assertApprovedRevision(path, revision, purpose);
+  if (JSON.stringify(current) !== JSON.stringify({
+    schema: accepted.schema,
+    approved_by: accepted.approved_by,
+    requested_by: accepted.requested_by,
+    revision: accepted.revision,
+    purpose: accepted.purpose,
+    approved: accepted.approved,
+    file: accepted.file,
+  })) fail("APPROVAL_CHANGED_AFTER_ACCEPTANCE");
+  return current;
 }
 
 export function assertCleanPreflight(observed) {
@@ -217,14 +273,82 @@ function jsonCommand(tool, args, options) {
 
 function git(root, args, records) { return execute("git", ["-C", root, "-c", "core.hooksPath=/dev/null", ...args], { records }); }
 
+export function verifyRevisionLineage(root, revisions, records = []) {
+  for (const revision of Object.values(revisions)) {
+    if (!/^[0-9a-f]{40}$/.test(revision) || git(root, ["cat-file", "-t", revision], records).stdout !== "commit") fail("REVISION_INVALID", revision);
+  }
+  const commit = (revision) => {
+    const [id, parents, tree] = git(root, ["show", "-s", "--format=%H%x09%P%x09%T", revision], records).stdout.split("\t");
+    return { revision: id, parents: parents ? parents.split(" ") : [], tree };
+  };
+  const v1 = commit(revisions.v1);
+  const v2 = commit(revisions.v2);
+  const recovery = commit(revisions.revert);
+  if (v2.parents.length !== 1 || v2.parents[0] !== v1.revision) fail("V2_NOT_DIRECT_SUCCESSOR");
+  if (recovery.parents.length !== 1 || recovery.parents[0] !== v2.revision) fail("RECOVERY_NOT_DIRECT_SUCCESSOR");
+  if (v1.tree === v2.tree) fail("V2_TREE_UNCHANGED");
+  if (recovery.tree !== v1.tree) fail("RECOVERY_TREE_MISMATCH");
+  const patch = (from, to) => {
+    const bytes = git(root, ["diff", "--binary", from, to, "--"], records).stdout;
+    return { from, to, bytes: Buffer.byteLength(bytes), patch_sha256: sha256(bytes) };
+  };
+  return {
+    v1: { revision: v1.revision, tree: v1.tree },
+    v2: { revision: v2.revision, parent: v2.parents[0], tree: v2.tree },
+    recovery: { revision: recovery.revision, parent: recovery.parents[0], tree: recovery.tree },
+    v1_to_v2: patch(v1.revision, v2.revision),
+    v2_to_recovery: patch(v2.revision, recovery.revision),
+  };
+}
+
 function verifyDeliveryRepository(rootInput, revisions, records) {
   const root = realpathSync(resolve(rootInput));
   if (lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory()) fail("DELIVERY_ROOT_INVALID");
-  for (const revision of revisions) {
-    if (!/^[0-9a-f]{40}$/.test(revision)) fail("REVISION_INVALID");
-    if (git(root, ["cat-file", "-t", revision], records).stdout !== "commit") fail("REVISION_INVALID", revision);
-  }
   return root;
+}
+
+function kindOwnershipValid(nodeInspect) {
+  const node = Array.isArray(nodeInspect) && nodeInspect.length === 1 ? nodeInspect[0] : null;
+  return node?.Name === `/${EXACT.node}`
+    && node.Config?.Image === KIND_IMAGE
+    && node.Config?.Labels?.["io.x-k8s.kind.cluster"] === EXACT.cluster
+    && node.Config?.Labels?.["io.x-k8s.kind.role"] === "control-plane"
+    && Object.hasOwn(node.NetworkSettings?.Networks ?? {}, "kind");
+}
+
+export async function cleanupKindAfterCreateAttempt(observed, { execute: executor, observe }) {
+  if (!observed.createAttempted) return await observe();
+  const namedStatePresent = observed.clusters.includes(EXACT.cluster) || (Array.isArray(observed.nodeInspect) && observed.nodeInspect.length > 0);
+  if (!namedStatePresent) return await observe();
+  if (!kindOwnershipValid(observed.nodeInspect)) fail("KIND_OWNERSHIP_INVALID");
+  await executor("kind", ["delete", "cluster", "--name", EXACT.cluster]);
+  const absence = await observe();
+  if (absence.cluster || absence.node) fail("KIND_CLEANUP_INCOMPLETE");
+  return absence;
+}
+
+export async function invokeKindCreate({ state, create, cleanup }) {
+  state.createAttempted = true;
+  try {
+    const result = await create();
+    state.created = true;
+    return result;
+  } catch (error) {
+    state.partialCleanupAbsence = await cleanup();
+    throw error;
+  }
+}
+
+async function cleanupObservedKindAttempt(records, state) {
+  const clusters = execute("kind", ["get", "clusters"], { records, timeout: 30_000 }).stdout.split(/\r?\n/).filter(Boolean);
+  const nodeInspect = jsonCommand("docker", ["inspect", EXACT.node], { records, accepted: [0, 1], timeout: 30_000 });
+  return cleanupKindAfterCreateAttempt({ createAttempted: state.createAttempted, nodeInspect, clusters }, {
+    execute: (tool, args) => execute(tool, args, { records, accepted: [0], timeout: 180_000 }),
+    observe: () => {
+      const final = observedPreflight(records);
+      return { cluster: final.cluster, node: final.node };
+    },
+  });
 }
 
 function imageIdentity(image, records) {
@@ -401,6 +525,21 @@ function stopMirror(mirrorRoot, records) {
   return stopGitMirror({ rootInput: mirrorRoot, runtime: task4Runtime(records) });
 }
 
+function openApprovalGate(path, revision, purpose, observed) {
+  const gatePath = `${path}.gate.json`;
+  if (existsSync(gatePath)) fail("PREEXISTING_APPROVAL_GATE", purpose);
+  const openedAtMs = Date.now();
+  const gate = {
+    schema: "agentic-iac-s10-approval-gate/v1",
+    purpose,
+    revision,
+    opened_at: new Date(openedAtMs).toISOString(),
+    observed,
+  };
+  writeFileSync(gatePath, `${JSON.stringify(gate)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  return { openedAtMs, opened_at: gate.opened_at };
+}
+
 export async function runGitOpsLifecycle(input) {
   const records = [];
   const measurements = { samples: [], peak_bytes: 0 };
@@ -408,17 +547,17 @@ export async function runGitOpsLifecycle(input) {
   const revisions = { v1: input.v1Revision, v2: input.v2Revision, revert: input.revertRevision };
   const deliveryRoot = verifyDeliveryRepository(input.deliveryRoot, Object.values(revisions), records);
   const mirrorRoot = canonicalMirrorRoot(input.mirrorRoot);
+  assertLaterApprovalsAbsent([input.approvalV2, input.approvalRevert]);
   const approvals = {
-    v1: assertApprovedRevision(input.approvalV1, revisions.v1, "promote-v1"),
-    v2: assertApprovedRevision(input.approvalV2, revisions.v2, "promote-v2"),
-    revert: assertApprovedRevision(input.approvalRevert, revisions.revert, "revert-and-recover"),
+    v1: { gate: "launch", ...assertApprovedRevision(input.approvalV1, revisions.v1, "promote-v1") },
   };
+  const lineage = verifyRevisionLineage(deliveryRoot, revisions, records);
   assertNoDirectPromotion({ previousRevision: revisions.v1, nextRevision: revisions.v2, mutationCommand: null });
   assertCleanPreflight(observedPreflight(records));
   const sampler = startSampler();
-  const report = { schema: "agentic-iac-s10-gitops-lifecycle/v1", result: "IN_PROGRESS", started_at: new Date().toISOString(), exact_names: EXACT, frozen_versions: { kind_image: KIND_IMAGE, argo_chart: CHART_VERSION, argo_application: APP_VERSION, git_image: GIT_IMAGE }, revisions, approvals, commands: records, measurements, observations: {}, cleanup: {}, proof_limits: ["Local course approval records bind revisions but do not prove an external identity provider.", "The read-only Git daemon is anonymous local course transport, not production authentication or authorization.", "The Git revision probe runs in a hardened disposable client on the Kind network; it does not prove host bridge reachability.", "Node-container docker stats measures the named course node, not the Docker Desktop VM working set.", "The authoring-host live run used macOS sleep prevention; caffeinate is not a learner dependency."] };
+  const report = { schema: "agentic-iac-s10-gitops-lifecycle/v1", result: "IN_PROGRESS", started_at: new Date().toISOString(), exact_names: EXACT, frozen_versions: { kind_image: KIND_IMAGE, argo_chart: CHART_VERSION, argo_application: APP_VERSION, git_image: GIT_IMAGE }, revisions, lineage, approvals, commands: records, measurements, observations: {}, cleanup: {}, proof_limits: ["Local course approval records bind revisions but do not prove an external identity provider.", "The read-only Git daemon is anonymous local course transport, not production authentication or authorization.", "The Git revision probe runs in a hardened disposable client on the Kind network; it does not prove host bridge reachability.", "Node-container docker stats measures the named course node, not the Docker Desktop VM working set.", "The authoring-host live run used macOS sleep prevention; caffeinate is not a learner dependency.", "Raw runner command records can contain local filesystem paths; Task 6 must sanitize them before learner publication."] };
   let mirrorActive = false;
-  let clusterCreated = false;
+  const clusterState = { createAttempted: false, created: false, partialCleanupAbsence: null };
   try {
     execute("docker", ["build", "--label", "com.schoolofdevops.course=agentic-iac-s10", "--label", "com.schoolofdevops.release=s10-v1", "-t", WORKLOAD_IMAGES[0], join(repositoryRoot, "section-9", "app")], { records, timeout: 900_000 });
     execute("docker", ["build", "--label", "com.schoolofdevops.course=agentic-iac-s10", "--label", "com.schoolofdevops.release=s10-v2", "-t", WORKLOAD_IMAGES[1], join(repositoryRoot, "section-9", "app")], { records, timeout: 900_000 });
@@ -442,8 +581,11 @@ export async function runGitOpsLifecycle(input) {
       report.observations.argocd_transport_images.push({ source_reference: image, ...transportIdentity, loaded_reference: image });
     }
 
-    execute("kind", ["create", "cluster", "--name", EXACT.cluster, "--image", KIND_IMAGE, "--config", join(sectionRoot, "tools", "kind", "cluster.yaml"), "--wait", "180s"], { records, timeout: 300_000 });
-    clusterCreated = true;
+    await invokeKindCreate({
+      state: clusterState,
+      create: () => execute("kind", ["create", "cluster", "--name", EXACT.cluster, "--image", KIND_IMAGE, "--config", join(sectionRoot, "tools", "kind", "cluster.yaml"), "--wait", "180s"], { records, timeout: 300_000 }),
+      cleanup: () => cleanupObservedKindAttempt(records, clusterState),
+    });
     for (const image of [...WORKLOAD_IMAGES, ...argoImages]) execute("kind", ["load", "docker-image", image, "--name", EXACT.cluster], { records, timeout: 180_000 });
     const nodeImages = jsonCommand("docker", ["exec", EXACT.node, "crictl", "images", "-o", "json"], { records, timeout: 60_000 });
     const nodeTags = new Set(nodeImages.images?.flatMap((image) => image.repoTags ?? []) ?? []);
@@ -470,14 +612,24 @@ export async function runGitOpsLifecycle(input) {
     execute("kubectl", ["--context", EXACT.context, "apply", "-f", join(sectionRoot, "argocd", "application.yaml")], { records });
     const application = jsonCommand("kubectl", ["--context", EXACT.context, "-n", EXACT.argocdNamespace, "get", "application", EXACT.application, "-o", "json"], { records });
     if (application.spec?.syncPolicy?.automated !== undefined) fail("AUTOMATED_SYNC_FORBIDDEN");
+    assertApprovalUnchanged(input.approvalV1, revisions.v1, "promote-v1", approvals.v1);
     explicitSync(revisions.v1, records);
     report.observations.v1_application = (await waitApplication(revisions.v1, records)).status;
     waitForWorkloadRollouts(records);
     report.observations.v1_workload = inspectWorkload(records);
 
+    const v2Gate = openApprovalGate(input.approvalV2, revisions.v2, "promote-v2", {
+      sync: report.observations.v1_application.sync?.status,
+      health: report.observations.v1_application.health?.status,
+      operation: report.observations.v1_application.operationState?.phase,
+      revision: report.observations.v1_application.sync?.revision,
+    });
+    approvals.v2 = { gate: v2Gate.opened_at, ...(await waitForApprovedRevision(input.approvalV2, revisions.v2, "promote-v2", { gateMs: v2Gate.openedAtMs })) };
+
     stopMirror(mirrorRoot, records); mirrorActive = false;
     mirror(deliveryRoot, revisions.v2, records);
     report.observations.v2_mirror = prepareAndStartMirror(deliveryRoot, revisions.v2, mirrorRoot, records); mirrorActive = true;
+    assertApprovalUnchanged(input.approvalV2, revisions.v2, "promote-v2", approvals.v2);
     explicitSync(revisions.v2, records);
     report.observations.v2_application = (await waitApplication(revisions.v2, records)).status;
     waitForWorkloadRollouts(records);
@@ -492,9 +644,16 @@ export async function runGitOpsLifecycle(input) {
     if (drifted.replicas !== 2) fail("AUTOMATIC_SELF_HEAL_OBSERVED");
     report.observations.drift_after_15_seconds = drifted;
 
+    const revertGate = openApprovalGate(input.approvalRevert, revisions.revert, "revert-and-recover", {
+      sync: report.observations.drift.sync?.status,
+      replicas_after_15_seconds: drifted.replicas,
+    });
+    approvals.revert = { gate: revertGate.opened_at, ...(await waitForApprovedRevision(input.approvalRevert, revisions.revert, "revert-and-recover", { gateMs: revertGate.openedAtMs })) };
+
     stopMirror(mirrorRoot, records); mirrorActive = false;
     mirror(deliveryRoot, revisions.revert, records);
     report.observations.revert_mirror = prepareAndStartMirror(deliveryRoot, revisions.revert, mirrorRoot, records); mirrorActive = true;
+    assertApprovalUnchanged(input.approvalRevert, revisions.revert, "revert-and-recover", approvals.revert);
     explicitSync(revisions.revert, records);
     report.observations.recovery_application = (await waitApplication(revisions.revert, records)).status;
     waitForWorkloadRollouts(records);
@@ -507,12 +666,14 @@ export async function runGitOpsLifecycle(input) {
     const attempt = async (step, action) => {
       try { return await action(); } catch (error) { cleanupErrors.push({ step, error: error.message }); return null; }
     };
-    let clusterOwned = false;
-    if (clusterCreated) {
-      const inspected = await attempt("validate-kind-ownership", () => jsonCommand("docker", ["inspect", EXACT.node], { records, timeout: 30_000 }));
-      clusterOwned = inspected?.[0]?.Config?.Labels?.["io.x-k8s.kind.cluster"] === EXACT.cluster;
-    }
-    const owner = clusterCreated
+    const clusters = clusterState.createAttempted
+      ? await attempt("observe-kind-clusters", () => execute("kind", ["get", "clusters"], { records, timeout: 30_000 }))
+      : null;
+    const inspected = clusterState.createAttempted
+      ? await attempt("validate-kind-ownership", () => jsonCommand("docker", ["inspect", EXACT.node], { records, accepted: [0, 1], timeout: 30_000 }))
+      : [];
+    const clusterOwned = kindOwnershipValid(inspected);
+    const owner = clusterState.createAttempted
       ? await attempt("read-lifecycle-owner", () => execute("kubectl", ["--context", EXACT.context, "-n", EXACT.workloadNamespace, "get", "configmap", "agentic-iac-s10-lifecycle-owner", "-o", "json"], { records, accepted: [0, 1], timeout: 30_000 }))
       : null;
     const configMapOwned = owner?.exit === 0 && JSON.parse(owner.stdout).data?.cluster === EXACT.cluster;
@@ -525,7 +686,17 @@ export async function runGitOpsLifecycle(input) {
       report.cleanup.kubernetes_absence_before_cluster_delete = await attempt("wait-kubernetes-absence", () => waitCleanupAbsence(records));
     }
     if (existsSync(mirrorRoot)) await attempt("stop-git-mirror", () => stopMirror(mirrorRoot, records));
-    if (clusterOwned) await attempt("delete-kind-cluster", () => execute("kind", ["delete", "cluster", "--name", EXACT.cluster], { records, accepted: [0], timeout: 180_000 }));
+    if (clusterState.createAttempted) await attempt("delete-kind-cluster", () => cleanupKindAfterCreateAttempt({
+      createAttempted: true,
+      nodeInspect: inspected ?? [],
+      clusters: clusters?.stdout?.split(/\r?\n/).filter(Boolean) ?? [],
+    }, {
+      execute: (tool, args) => execute(tool, args, { records, accepted: [0], timeout: 180_000 }),
+      observe: () => {
+        const final = observedPreflight(records);
+        return { cluster: final.cluster, node: final.node };
+      },
+    }));
     await delay(2_500);
     report.cleanup.absence = await attempt("prove-final-absence", () => observedPreflight(records)) ?? { cluster: true };
     report.cleanup.errors = cleanupErrors;
