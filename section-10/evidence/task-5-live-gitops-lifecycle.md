@@ -57,8 +57,8 @@ checks returned `No kind clusters found.` and no Section 10 Docker container.
 
 ## Proof boundary
 
-This records the exact local runner, revisions, explicit human-signed course
-records, observed images, named-node memory sample, request completion, drift
-behaviour, recovery, and cleanup for this run. It does not establish external
-reviewer authentication, host-wide Docker memory use, or production Git
-authorization.
+This records the exact local runner, revisions, explicit local human-approval
+course records, observed images, named-node memory sample, request completion,
+drift behaviour, recovery, and cleanup for this run. It does not establish
+external reviewer authentication, IdP identity, cryptographic signatures,
+host-wide Docker memory use, or production Git authorization.

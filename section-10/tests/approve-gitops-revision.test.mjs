@@ -174,6 +174,27 @@ test("helper rejects a gate substituted after it stages an approval and removes 
   }
 });
 
+test("helper rejects a same-byte regular-file approval replacement after publish without removing it", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-helper-same-byte-swap-"));
+  try {
+    const input = gateFor(root);
+    const approvedBytes = `${JSON.stringify({
+      schema: "agentic-iac-s10-human-approval/v1", approved_by: "human-platform-reviewer", requested_by: "agent-author",
+      revision: input.revision, purpose: input.purpose, approved: true,
+    })}\n`;
+    assert.throws(() => createApprovalFromGate(input, {
+      afterPublish: () => {
+        rmSync(input.output);
+        writeFileSync(input.output, approvedBytes, { mode: 0o600 });
+      },
+    }), /APPROVAL_OUTPUT_CHANGED/);
+    assert.equal(readFileSync(input.output, "utf8"), approvedBytes);
+    assert.equal(lstatSync(input.output).mode & 0o777, 0o600);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("helper rejects a substituted output path after staging without overwriting it", () => {
   const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-helper-output-swap-"));
   const target = mkdtempSync(join(tmpdir(), "agentic-iac-s10-helper-output-target-"));

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { randomBytes } from "node:crypto";
-import { closeSync, fchmodSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { closeSync, constants as fsConstants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, parse, resolve } from "node:path";
 
 import { HUMAN_APPROVAL_IDENTITIES, HUMAN_APPROVAL_SCHEMA, assertApprovalGateBinding, assertApprovedRevision, readApprovalGateBinding } from "./run-gitops-lifecycle.mjs";
@@ -26,6 +26,39 @@ function isRevision(value) { return typeof value === "string" && /^[0-9a-f]{40}$
 function sameIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size
     && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+function sha256(raw) { return createHash("sha256").update(raw).digest("hex"); }
+function approvalOutputIdentity(metadata, raw) {
+  return {
+    device: String(metadata.dev), inode: String(metadata.ino), bytes: metadata.size,
+    owner: String(metadata.uid), group: String(metadata.gid), mode: metadata.mode & 0o777,
+    ctime_ms: metadata.ctimeMs, mtime_ms: metadata.mtimeMs, identity_sha256: sha256(raw),
+  };
+}
+function sameOutputNode(left, right) {
+  return left.device === right.device && left.inode === right.inode && left.bytes === right.bytes
+    && left.owner === right.owner && left.group === right.group && left.mode === right.mode
+    && left.identity_sha256 === right.identity_sha256;
+}
+function sameOutputIdentity(left, right) { return sameOutputNode(left, right) && left.ctime_ms === right.ctime_ms && left.mtime_ms === right.mtime_ms; }
+
+function readNoFollowApprovalOutput(path) {
+  const before = lstatSync(path);
+  if (!before.isFile() || before.isSymbolicLink() || (before.mode & 0o777) !== 0o600) fail("APPROVAL_RECORD_INVALID");
+  let descriptor;
+  try {
+    descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || (opened.mode & 0o777) !== 0o600 || !sameIdentity(before, opened)) fail("APPROVAL_RECORD_CHANGED_DURING_READ");
+    const raw = readFileSync(descriptor, "utf8");
+    const after = fstatSync(descriptor);
+    if (!after.isFile() || (after.mode & 0o777) !== 0o600 || !sameIdentity(opened, after)) fail("APPROVAL_RECORD_CHANGED_DURING_READ");
+    const pathname = lstatSync(path);
+    if (!pathname.isFile() || pathname.isSymbolicLink() || !sameIdentity(after, pathname)) fail("APPROVAL_RECORD_CHANGED_DURING_READ");
+    return approvalOutputIdentity(after, raw);
+  } finally {
+    if (descriptor != null) closeSync(descriptor);
+  }
 }
 
 export function readApprovalGate(path, { lstat = lstatSync, readFile = readFileSync } = {}) {
@@ -91,8 +124,7 @@ function createTemporaryApproval(output, bytes) {
 
 function removeOnlyCreatedOutput(path, expected) {
   try {
-    const current = lstatSync(path);
-    if (current.isFile() && !current.isSymbolicLink() && current.dev === expected.dev && current.ino === expected.ino) unlinkSync(path);
+    if (sameOutputIdentity(readNoFollowApprovalOutput(path), expected)) unlinkSync(path);
   } catch { /* Fail closed: never remove a replacement. */ }
 }
 
@@ -119,12 +151,18 @@ export function createApprovalFromGate({ gate, output, revision, purpose }, { af
       if (error?.code === "EEXIST") fail("APPROVAL_OUTPUT_EXISTS");
       throw error;
     }
-    created = lstatSync(requestedOutput);
-    if (!created.isFile() || created.isSymbolicLink() || (created.mode & 0o777) !== 0o600 || !sameIdentity(created, lstatSync(temporary))) fail("APPROVAL_OUTPUT_INVALID");
+    created = readNoFollowApprovalOutput(requestedOutput);
+    const temporaryIdentity = approvalOutputIdentity(lstatSync(temporary), bytes);
+    if (!sameOutputNode(created, temporaryIdentity)) fail("APPROVAL_OUTPUT_INVALID");
     unlinkSync(temporary);
+    const published = readNoFollowApprovalOutput(requestedOutput);
+    if (!sameOutputNode(created, published)) fail("APPROVAL_OUTPUT_CHANGED");
+    created = published;
     afterPublish();
     assertGateUnchanged(accepted);
+    if (!sameOutputIdentity(created, readNoFollowApprovalOutput(requestedOutput))) fail("APPROVAL_OUTPUT_CHANGED");
     assertApprovedRevision(requestedOutput, revision, purpose);
+    if (!sameOutputIdentity(created, readNoFollowApprovalOutput(requestedOutput))) fail("APPROVAL_OUTPUT_CHANGED");
     return { revision, purpose };
   } catch (error) {
     if (created) removeOnlyCreatedOutput(requestedOutput, created);
