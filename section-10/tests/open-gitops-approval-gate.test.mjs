@@ -183,6 +183,8 @@ function runtimeSnapshot({ currentRevision = "1".repeat(40), imageTag = "s10-v1"
 test("production opener retains the exact gate binding through foreground approval", () => {
   assert.equal(opener.openLearnerApprovalGate, undefined);
   assert.equal(opener.openGate, undefined);
+  assert.equal(opener.completeInteractiveApproval, undefined);
+  assert.equal(opener.publishApprovalFromBinding, undefined);
   const source = readFileSync(openerSource, "utf8");
   assert.doesNotMatch(source, /(?:create|open)LearnerApprovalGate\([^)]*,\s*\{/);
   assert.doesNotMatch(source, /\b(?:kubeRun|openGate|driftObservationMs|sleep)\s*=/);
@@ -190,9 +192,12 @@ test("production opener retains the exact gate binding through foreground approv
   assert.match(source, /assertApprovalBoundaryUnchanged\(boundary, \{ gateExpected: true, gateBinding: gate\.binding \}\)/);
   assert.match(source, /gateBinding: gate\.binding/);
   assert.match(source, /completeInteractiveApproval\(\{[\s\S]*gateBinding: result\.gateBinding/);
+  assert.doesNotMatch(source, /from "\.\/approve-gitops-revision\.mjs"/);
   assert.match(source, /JSON\.stringify\(result\.gateBinding\.gate, null, 2\)/);
   assert.doesNotMatch(source, /binding\.json|writeApprovalGateHandoff|assertApprovalGateHandoff|\.sock|startBoundApprovalSession/);
   assert.match(source, /removeOwnedApprovalGate\(gate\.ownership\)/);
+  assert.match(source, /gateOwnership: gate\.ownership/);
+  assert.match(source, /removeOwnedApprovalGate\(result\.gateOwnership\)/);
 });
 
 test("promotion accepts only the frozen v1 to v2 byte transition", () => {

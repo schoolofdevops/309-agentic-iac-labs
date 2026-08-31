@@ -1,20 +1,26 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync,
+  linkSync, lstatSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync,
+} from "node:fs";
 import { userInfo } from "node:os";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, parse, resolve, sep } from "node:path";
+import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
 import {
   EXACT,
+  HUMAN_APPROVAL_IDENTITIES,
+  HUMAN_APPROVAL_SCHEMA,
   assertApprovalGateBinding,
+  assertApprovedRevision,
   openApprovalGate,
   removeOwnedApprovalGate,
 } from "./run-gitops-lifecycle.mjs";
-import { completeInteractiveApproval } from "./approve-gitops-revision.mjs";
 import { DAEMON_COMMAND, IMAGE as GIT_IMAGE, productionRuntime } from "./start-git-mirror.mjs";
 
 const PROMOTION_PATH = "section-10/starter/gitops/chart/values.yaml";
@@ -96,9 +102,168 @@ const SAFE_GIT_CONFIG = [
   "-c", "diff.external=", "-c", "protocol.file.allow=always",
 ];
 const PURPOSES = new Set(["promote-v2", "revert-and-recover"]);
+const GATE_SCHEMA = "agentic-iac-s10-approval-gate/v1";
+const GATE_SUFFIX = ".gate.json";
+const GATE_KEYS = ["observed", "opened_at", "purpose", "revision", "schema"];
+const PROMPT_TIMEOUT_MS = 300_000;
 
 function fail(code, detail = "") { throw new Error(`${code}${detail ? `: ${detail}` : ""}`); }
 function isRevision(value) { return typeof value === "string" && /^[0-9a-f]{40}$/.test(value); }
+function exactObjectKeys(value, keys) {
+  return value != null && typeof value === "object" && !Array.isArray(value)
+    && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+}
+function approvalObservedIsValid(purpose, observed) {
+  if (purpose === "promote-v2") return exactObjectKeys(observed, ["health", "operation", "revision", "sync"])
+    && observed.sync === "Synced" && observed.health === "Healthy" && observed.operation === "Succeeded" && isRevision(observed.revision);
+  return purpose === "revert-and-recover" && exactObjectKeys(observed, ["replicas_after_15_seconds", "sync"])
+    && observed.sync === "OutOfSync" && observed.replicas_after_15_seconds === 2;
+}
+function sameFileStat(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size
+    && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+function approvalOutputIdentity(metadata, raw) {
+  return {
+    device: String(metadata.dev), inode: String(metadata.ino), bytes: metadata.size,
+    owner: String(metadata.uid), group: String(metadata.gid), mode: metadata.mode & 0o777,
+    ctime_ms: metadata.ctimeMs, mtime_ms: metadata.mtimeMs,
+    identity_sha256: createHash("sha256").update(raw).digest("hex"),
+  };
+}
+function sameOutputNode(left, right) {
+  return left.device === right.device && left.inode === right.inode && left.bytes === right.bytes
+    && left.owner === right.owner && left.group === right.group && left.mode === right.mode
+    && left.identity_sha256 === right.identity_sha256;
+}
+function sameOutputIdentity(left, right) {
+  return sameOutputNode(left, right) && left.ctime_ms === right.ctime_ms && left.mtime_ms === right.mtime_ms;
+}
+function readNoFollowApprovalOutput(path) {
+  const before = lstatSync(path);
+  if (!before.isFile() || before.isSymbolicLink() || (before.mode & 0o777) !== 0o600) fail("APPROVAL_RECORD_INVALID");
+  let descriptor;
+  try {
+    descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || (opened.mode & 0o777) !== 0o600 || !sameFileStat(before, opened)) fail("APPROVAL_RECORD_CHANGED_DURING_READ");
+    const raw = readFileSync(descriptor, "utf8");
+    const after = fstatSync(descriptor);
+    if (!after.isFile() || (after.mode & 0o777) !== 0o600 || !sameFileStat(opened, after)) fail("APPROVAL_RECORD_CHANGED_DURING_READ");
+    const pathname = lstatSync(path);
+    if (!pathname.isFile() || pathname.isSymbolicLink() || !sameFileStat(after, pathname)) fail("APPROVAL_RECORD_CHANGED_DURING_READ");
+    return approvalOutputIdentity(after, raw);
+  } finally { if (descriptor != null) closeSync(descriptor); }
+}
+function validateGateBinding(binding) {
+  let current;
+  try { current = assertApprovalGateBinding(binding); } catch { fail("APPROVAL_GATE_CHANGED"); }
+  const gate = current.gate;
+  if (current.file.mode !== 0o600 || (typeof process.getuid === "function" && current.file.owner !== String(process.getuid()))
+    || !exactObjectKeys(gate, GATE_KEYS) || gate.schema !== GATE_SCHEMA || !isRevision(gate.revision)
+    || typeof gate.purpose !== "string" || !PURPOSES.has(gate.purpose)
+    || typeof gate.opened_at !== "string" || !Number.isFinite(Date.parse(gate.opened_at))
+    || !approvalObservedIsValid(gate.purpose, gate.observed)
+    || (gate.purpose === "promote-v2" && gate.observed.revision === gate.revision)) fail("APPROVAL_GATE_INVALID");
+  return current;
+}
+function approvalOutputPath(gate, output) {
+  const gatePath = resolve(gate);
+  const requestedOutput = resolve(output);
+  rejectSymlinkAncestors(gatePath);
+  rejectSymlinkAncestors(requestedOutput);
+  if (!gatePath.endsWith(GATE_SUFFIX) || requestedOutput !== gatePath.slice(0, -GATE_SUFFIX.length)
+    || dirname(requestedOutput) !== dirname(gatePath)) fail("APPROVAL_PATH_FORBIDDEN");
+  return requestedOutput;
+}
+function createTemporaryApproval(output, bytes) {
+  const directory = dirname(output);
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const temporary = resolve(directory, `.${parse(output).base}.${randomBytes(16).toString("hex")}.tmp`);
+    let descriptor;
+    try {
+      descriptor = openSync(temporary, "wx", 0o600);
+      fchmodSync(descriptor, 0o600);
+      writeFileSync(descriptor, bytes, "utf8");
+      fsyncSync(descriptor);
+      closeSync(descriptor);
+      descriptor = undefined;
+      return temporary;
+    } catch (error) {
+      if (descriptor != null) try { closeSync(descriptor); } catch { /* Preserve original failure. */ }
+      try { unlinkSync(temporary); } catch { /* Best effort. */ }
+      if (error?.code !== "EEXIST") throw error;
+    }
+  }
+  fail("APPROVAL_TEMPORARY_CREATE_FAILED");
+}
+function removeOnlyCreatedOutput(path, expected) {
+  try { if (sameOutputIdentity(readNoFollowApprovalOutput(path), expected)) unlinkSync(path); } catch { /* Never remove a replacement. */ }
+}
+function publishApprovalFromBinding({ gateBinding, output, revision, purpose }) {
+  const accepted = validateGateBinding(gateBinding);
+  const requestedOutput = approvalOutputPath(accepted.path, output);
+  try { lstatSync(requestedOutput); fail("APPROVAL_OUTPUT_EXISTS"); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  if (accepted.gate.revision !== revision) fail("UNAPPROVED_REVISION");
+  if (accepted.gate.purpose !== purpose) fail("APPROVAL_PURPOSE_MISMATCH");
+  const bytes = `${JSON.stringify({
+    schema: HUMAN_APPROVAL_SCHEMA, approved_by: HUMAN_APPROVAL_IDENTITIES.approved_by,
+    requested_by: HUMAN_APPROVAL_IDENTITIES.requested_by, revision, purpose, approved: true,
+  })}\n`;
+  validateGateBinding(gateBinding);
+  const temporary = createTemporaryApproval(requestedOutput, bytes);
+  let created;
+  try {
+    validateGateBinding(gateBinding);
+    try { linkSync(temporary, requestedOutput); } catch (error) {
+      if (error?.code === "EEXIST") fail("APPROVAL_OUTPUT_EXISTS");
+      throw error;
+    }
+    created = readNoFollowApprovalOutput(requestedOutput);
+    if (!sameOutputNode(created, approvalOutputIdentity(lstatSync(temporary), bytes))) fail("APPROVAL_OUTPUT_INVALID");
+    unlinkSync(temporary);
+    const published = readNoFollowApprovalOutput(requestedOutput);
+    if (!sameOutputNode(created, published)) fail("APPROVAL_OUTPUT_CHANGED");
+    created = published;
+    validateGateBinding(gateBinding);
+    if (!sameOutputIdentity(created, readNoFollowApprovalOutput(requestedOutput))) fail("APPROVAL_OUTPUT_CHANGED");
+    const approval = assertApprovedRevision(requestedOutput, revision, purpose);
+    if (!sameOutputIdentity(created, readNoFollowApprovalOutput(requestedOutput))) fail("APPROVAL_OUTPUT_CHANGED");
+    validateGateBinding(gateBinding);
+    return approval;
+  } catch (error) {
+    if (created) removeOnlyCreatedOutput(requestedOutput, created);
+    throw error;
+  } finally { try { unlinkSync(temporary); } catch { /* Best effort. */ } }
+}
+function readHumanApproval(revision) {
+  return new Promise((resolvePromise, reject) => {
+    const lines = createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      lines.close();
+      if (error) reject(error); else resolvePromise(value);
+    };
+    const timeout = setTimeout(() => finish(new Error("HUMAN_APPROVAL_INPUT_TIMEOUT")), PROMPT_TIMEOUT_MS);
+    lines.once("line", (line) => finish(undefined, line));
+    lines.once("close", () => finish(new Error("HUMAN_APPROVAL_INPUT_EOF")));
+    process.stdout.write(`Approval> type exactly: approve ${revision}\n`);
+  });
+}
+async function completeInteractiveApproval({ gateBinding, output, purpose, revision }) {
+  const accepted = validateGateBinding(gateBinding);
+  const requestedOutput = approvalOutputPath(accepted.path, output);
+  if (accepted.gate.revision !== revision) fail("UNAPPROVED_REVISION");
+  if (accepted.gate.purpose !== purpose) fail("APPROVAL_PURPOSE_MISMATCH");
+  try { lstatSync(requestedOutput); fail("APPROVAL_OUTPUT_EXISTS"); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  const humanInput = await readHumanApproval(revision);
+  if (humanInput !== `approve ${revision}`) fail("HUMAN_APPROVAL_INPUT_INVALID");
+  validateGateBinding(gateBinding);
+  return publishApprovalFromBinding({ gateBinding, output: requestedOutput, revision, purpose });
+}
 
 function trustedTool(name) {
   const candidates = name === "git"
@@ -604,6 +769,7 @@ async function createLearnerApprovalGate(input) {
       approval: boundary.approval,
       gate: gate.binding.path,
       gateBinding: gate.binding,
+      gateOwnership: gate.ownership,
       observed,
       purpose: input.purpose,
       revision: input.revision,
@@ -617,8 +783,10 @@ async function createLearnerApprovalGate(input) {
 }
 
 async function main() {
+  let result;
+  let approvalPublished = false;
   try {
-    const result = await createLearnerApprovalGate(parseArgs(process.argv.slice(2)));
+    result = await createLearnerApprovalGate(parseArgs(process.argv.slice(2)));
     process.stdout.write(`Approval gate opened for ${result.revision} (${result.purpose}).\n`);
     process.stdout.write(`Gate: ${result.gate}\n`);
     process.stdout.write(`${JSON.stringify(result.gateBinding.gate, null, 2)}\n`);
@@ -628,9 +796,16 @@ async function main() {
       purpose: result.purpose,
       revision: result.revision,
     });
+    approvalPublished = true;
     process.stdout.write(`Approved revision ${approval.revision} for ${approval.purpose}.\n`);
   } catch (error) {
-    const code = /^[A-Z_]+/.test(error?.message ?? "") ? error.message : `GATE_OPEN_FAILED: ${error.message}`;
+    let failure = error;
+    if (result?.gateOwnership && !approvalPublished) {
+      try { removeOwnedApprovalGate(result.gateOwnership); } catch (cleanupError) {
+        failure = new Error(`GATE_FAILURE_AND_CLEANUP_FAILED: ${error.message}; ${cleanupError.message}`);
+      }
+    }
+    const code = /^[A-Z_]+/.test(failure?.message ?? "") ? failure.message : `GATE_OPEN_FAILED: ${failure.message}`;
     process.stderr.write(`Approval not completed: ${code}.\n`);
     process.exitCode = 1;
   }
