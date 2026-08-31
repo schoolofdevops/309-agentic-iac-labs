@@ -376,10 +376,118 @@ function requiredJson(result, label) {
   try { return JSON.parse(result.stdout); } catch (error) { fail("KUBERNETES_EVIDENCE_JSON_INVALID", `${label}: ${error.message}`); }
 }
 
+const EXPECTED_KUBERNETES_LOG_TARGETS = Object.freeze([
+  { namespace: EXACT.argocdNamespace, component: "application-controller", workloadKind: "StatefulSet", workload: "argocd-application-controller", container: "application-controller" },
+  { namespace: EXACT.argocdNamespace, component: "applicationset-controller", workloadKind: "Deployment", workload: "argocd-applicationset-controller", container: "applicationset-controller" },
+  { namespace: EXACT.argocdNamespace, component: "redis", workloadKind: "Deployment", workload: "argocd-redis", container: "redis" },
+  { namespace: EXACT.argocdNamespace, component: "repo-server", workloadKind: "Deployment", workload: "argocd-repo-server", container: "repo-server" },
+  { namespace: EXACT.argocdNamespace, component: "server", workloadKind: "Deployment", workload: "argocd-server", container: "server" },
+  { namespace: EXACT.workloadNamespace, component: "api", workloadKind: "Deployment", workload: "inference-platform-api", container: "api" },
+  { namespace: EXACT.workloadNamespace, component: "dependencies", workloadKind: "Deployment", workload: "inference-platform-dependencies", container: "dependencies" },
+  { namespace: EXACT.workloadNamespace, component: "worker", workloadKind: "Deployment", workload: "inference-platform-worker", container: "worker" },
+]);
+
+const kubernetesNamePattern = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
+
+function expectedTargetLabels(target, { workload = false } = {}) {
+  if (target.namespace === EXACT.argocdNamespace) return {
+    "app.kubernetes.io/name": target.workload,
+    "app.kubernetes.io/instance": EXACT.release,
+    "app.kubernetes.io/component": target.component,
+    "app.kubernetes.io/managed-by": "Helm",
+    "app.kubernetes.io/part-of": EXACT.release,
+    "app.kubernetes.io/version": `v${APP_VERSION}`,
+    "helm.sh/chart": `argo-cd-${CHART_VERSION}`,
+  };
+  return {
+    "app.kubernetes.io/name": "inference-platform",
+    "app.kubernetes.io/component": target.component,
+    ...(workload ? { "app.kubernetes.io/managed-by": "Helm" } : {}),
+  };
+}
+
+function assertExactLabels(actual, expected, label) {
+  if (actual == null || typeof actual !== "object" || Array.isArray(actual)
+    || Object.entries(expected).some(([key, value]) => actual[key] !== value)) fail("KUBERNETES_EVIDENCE_LABEL_INVALID", label);
+}
+
+function exactControllerOwner(resource, label) {
+  const owners = resource?.metadata?.ownerReferences;
+  if (!Array.isArray(owners) || owners.length !== 1) fail("KUBERNETES_EVIDENCE_OWNER_INVALID", label);
+  const owner = owners[0];
+  if (owner.apiVersion !== "apps/v1" || owner.controller !== true || typeof owner.uid !== "string" || !owner.uid
+    || !kubernetesNamePattern.test(owner.name ?? "")) fail("KUBERNETES_EVIDENCE_OWNER_INVALID", label);
+  return owner;
+}
+
+function assertResourceIdentity(resource, { namespace, kind, name, uid, labels, templateLabels, container }, label) {
+  if (resource?.apiVersion !== "apps/v1" || resource?.kind !== kind
+    || resource.metadata?.namespace !== namespace || resource.metadata?.name !== name
+    || resource.metadata?.uid !== uid || typeof uid !== "string" || !uid) fail("KUBERNETES_EVIDENCE_OWNER_INVALID", label);
+  assertExactLabels(resource.metadata?.labels, labels, `${label} metadata`);
+  assertExactLabels(resource.spec?.template?.metadata?.labels, templateLabels, `${label} template`);
+  const containers = resource.spec?.template?.spec?.containers;
+  if (!Array.isArray(containers) || containers.length !== 1 || containers[0]?.name !== container) fail("KUBERNETES_EVIDENCE_CONTAINER_INVALID", label);
+}
+
+function deriveKubernetesLogTargets(podsByNamespace, loadAppsResource) {
+  const targets = [];
+  const used = new Set();
+  for (const namespace of [EXACT.argocdNamespace, EXACT.workloadNamespace]) {
+    const expected = EXPECTED_KUBERNETES_LOG_TARGETS.filter((target) => target.namespace === namespace);
+    const pods = podsByNamespace[namespace];
+    if (!Array.isArray(pods) || pods.length !== expected.length) fail("KUBERNETES_EVIDENCE_TARGET_SET_INVALID", `${namespace}: expected ${expected.length}, observed ${pods?.length ?? "invalid"}`);
+    for (const pod of pods) {
+      if (pod?.metadata?.namespace !== namespace
+        || typeof pod.metadata?.uid !== "string" || !pod.metadata.uid || !kubernetesNamePattern.test(pod.metadata?.name ?? "")) fail("KUBERNETES_EVIDENCE_TARGET_INVALID", namespace);
+      const matches = expected.filter((target) => {
+        try { assertExactLabels(pod.metadata.labels, expectedTargetLabels(target), `${namespace}/${pod.metadata.name}`); return true; }
+        catch { return false; }
+      });
+      if (matches.length !== 1) fail("KUBERNETES_EVIDENCE_TARGET_INVALID", `${namespace}/${pod.metadata.name}`);
+      const target = matches[0];
+      const targetId = `${namespace}/${target.workload}`;
+      if (used.has(targetId)) fail("KUBERNETES_EVIDENCE_TARGET_DUPLICATE", targetId);
+      const containers = pod.spec?.containers;
+      if (!Array.isArray(containers) || containers.length !== 1 || containers[0]?.name !== target.container) fail("KUBERNETES_EVIDENCE_CONTAINER_INVALID", targetId);
+      const podOwner = exactControllerOwner(pod, `${targetId} pod`);
+      let stableOwner = podOwner;
+      if (target.workloadKind === "Deployment") {
+        if (podOwner.kind !== "ReplicaSet") fail("KUBERNETES_EVIDENCE_OWNER_INVALID", `${targetId} pod`);
+        const replicaSet = loadAppsResource(namespace, "replicasets", podOwner.name);
+        if (replicaSet?.apiVersion !== "apps/v1" || replicaSet?.kind !== "ReplicaSet"
+          || replicaSet.metadata?.namespace !== namespace || replicaSet.metadata?.name !== podOwner.name
+          || replicaSet.metadata?.uid !== podOwner.uid) fail("KUBERNETES_EVIDENCE_OWNER_INVALID", `${targetId} ReplicaSet`);
+        assertExactLabels(replicaSet.metadata?.labels, expectedTargetLabels(target), `${targetId} ReplicaSet`);
+        stableOwner = exactControllerOwner(replicaSet, `${targetId} ReplicaSet`);
+      }
+      if (stableOwner.kind !== target.workloadKind || stableOwner.name !== target.workload) fail("KUBERNETES_EVIDENCE_OWNER_INVALID", targetId);
+      const resource = target.workloadKind === "Deployment" ? "deployments" : "statefulsets";
+      const workload = loadAppsResource(namespace, resource, target.workload);
+      assertResourceIdentity(workload, {
+        namespace, kind: target.workloadKind, name: target.workload, uid: stableOwner.uid,
+        labels: expectedTargetLabels(target, { workload: true }), templateLabels: expectedTargetLabels(target), container: target.container,
+      }, targetId);
+      used.add(targetId);
+      targets.push({
+        target_id: targetId, namespace, component: target.component, workload: target.workload,
+        owner: { api_version: "apps/v1", kind: target.workloadKind, name: target.workload, uid: stableOwner.uid },
+        pod_owner: { api_version: "apps/v1", kind: podOwner.kind, name: podOwner.name, uid: podOwner.uid },
+        labels: expectedTargetLabels(target), pod: pod.metadata.name, pod_uid: pod.metadata.uid, container: target.container,
+      });
+    }
+  }
+  const expectedIds = EXPECTED_KUBERNETES_LOG_TARGETS.map((target) => `${target.namespace}/${target.workload}`).sort();
+  const actualIds = [...used].sort();
+  if (JSON.stringify(actualIds) !== JSON.stringify(expectedIds)) fail("KUBERNETES_EVIDENCE_TARGET_SET_INVALID", "missing or unexpected target identity");
+  return targets.sort((left, right) => left.target_id.localeCompare(right.target_id));
+}
+
 export function captureKubernetesEvidence({ executor = execute, now = Date.now } = {}) {
   try {
     const events = [];
     const logs = [];
+    const podsByNamespace = {};
     for (const namespace of [EXACT.argocdNamespace, EXACT.workloadNamespace]) {
       const eventPath = `/api/v1/namespaces/${namespace}/events?limit=100`;
       const eventList = requiredJson(executor("kubectl", ["--context", EXACT.context, "get", "--raw", eventPath], { timeout: 30_000 }), `${namespace} events`);
@@ -403,18 +511,25 @@ export function captureKubernetesEvidence({ executor = execute, now = Date.now }
       }).sort((left, right) => `${left.created_at ?? ""}/${left.name ?? ""}`.localeCompare(`${right.created_at ?? ""}/${right.name ?? ""}`));
       events.push({ namespace, api: "core/v1", server_limit: 100, total_returned: eventItems.length, complete: true, items: eventItems });
 
-      const podPath = `/api/v1/namespaces/${namespace}/pods?limit=50`;
+      const expectedCount = EXPECTED_KUBERNETES_LOG_TARGETS.filter((target) => target.namespace === namespace).length;
+      const podPath = `/api/v1/namespaces/${namespace}/pods?limit=${expectedCount}`;
       const podList = requiredJson(executor("kubectl", ["--context", EXACT.context, "get", "--raw", podPath], { timeout: 30_000 }), `${namespace} pods`);
-      if (!Array.isArray(podList.items) || podList.items.length > 50 || podList.metadata?.continue) fail("KUBERNETES_EVIDENCE_TRUNCATED", `${namespace} pods`);
-      const containers = podList.items.flatMap((pod) => (pod.spec?.containers ?? []).map((container) => ({ pod: pod.metadata?.name, container: container.name })));
-      for (const target of containers.sort((left, right) => `${left.pod}/${left.container}`.localeCompare(`${right.pod}/${right.container}`))) {
-        if (!/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(target.pod ?? "") || !/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(target.container ?? "")) fail("KUBERNETES_EVIDENCE_TARGET_INVALID");
-        const result = executor("kubectl", ["--context", EXACT.context, "-n", namespace, "logs", target.pod, "-c", target.container, "--tail=200", "--limit-bytes=16384", "--timestamps=true"], { timeout: 30_000 });
-        if (result.exit !== 0) fail("KUBERNETES_EVIDENCE_COMMAND_FAILED", `${namespace}/${target.pod}/${target.container}`);
-        const sanitized = sanitizeEvidenceText(result.stdout, 16_384);
-        const sourceBytes = Buffer.byteLength(result.stdout);
-        logs.push({ namespace, pod: target.pod, container: target.container, tail_lines: 200, limit_bytes: 16_384, source_bytes: sourceBytes, source_limit_reached: sourceBytes >= 16_384, sanitized_bytes: sanitized.bytes, sanitized_sha256: sanitized.sha256, sanitizer_truncated: sanitized.truncated, text: sanitized.text });
-      }
+      if (podList.apiVersion !== "v1" || podList.kind !== "PodList") fail("KUBERNETES_EVIDENCE_JSON_INVALID", `${namespace} pods type`);
+      if (!Array.isArray(podList.items) || podList.items.length > expectedCount || podList.metadata?.continue) fail("KUBERNETES_EVIDENCE_TRUNCATED", `${namespace} pods`);
+      podsByNamespace[namespace] = podList.items;
+    }
+    const loadAppsResource = (namespace, resource, name) => {
+      if (!kubernetesNamePattern.test(name ?? "")) fail("KUBERNETES_EVIDENCE_TARGET_INVALID", `${namespace}/${resource}`);
+      const path = `/apis/apps/v1/namespaces/${namespace}/${resource}/${name}`;
+      return requiredJson(executor("kubectl", ["--context", EXACT.context, "get", "--raw", path], { timeout: 30_000 }), `${namespace}/${resource}/${name}`);
+    };
+    const targets = deriveKubernetesLogTargets(podsByNamespace, loadAppsResource);
+    for (const target of targets) {
+      const result = executor("kubectl", ["--context", EXACT.context, "-n", target.namespace, "logs", target.pod, "-c", target.container, "--tail=200", "--limit-bytes=16384", "--timestamps=true"], { timeout: 30_000 });
+      if (result.exit !== 0) fail("KUBERNETES_EVIDENCE_COMMAND_FAILED", `${target.namespace}/${target.pod}/${target.container}`);
+      const sanitized = sanitizeEvidenceText(result.stdout, 16_384);
+      const sourceBytes = Buffer.byteLength(result.stdout);
+      logs.push({ ...target, tail_lines: 200, limit_bytes: 16_384, source_bytes: sourceBytes, source_limit_reached: sourceBytes >= 16_384, sanitized_bytes: sanitized.bytes, sanitized_sha256: sanitized.sha256, sanitizer_truncated: sanitized.truncated, text: sanitized.text });
     }
     return { schema: "agentic-iac-s10-kubernetes-evidence/v1", captured_at: new Date(now()).toISOString(), events, logs };
   } catch (error) {
@@ -764,7 +879,7 @@ export async function runGitOpsLifecycle(input) {
   assertCleanPreflight(observedPreflight(records));
   const preRunInventory = capturePreRunInventory();
   const sampler = startSampler();
-  const report = { schema: "agentic-iac-s10-gitops-lifecycle/v1", result: "IN_PROGRESS", started_at: new Date().toISOString(), exact_names: EXACT, frozen_versions: { kind_image: KIND_IMAGE, argo_chart: CHART_VERSION, argo_application: APP_VERSION, git_image: GIT_IMAGE }, revisions, lineage, approvals, commands: records, measurements, observations: { pre_run_inventory: preRunInventory }, cleanup: {}, proof_limits: ["The pre-run inventory records exact relative cache facts; it does not label the host or run globally cold or warm.", "Kubernetes events are complete only when the course namespaces return within the frozen server limits; log capture covers regular containers, not init-container or previous-instance logs.", "Local course approval records bind revisions but do not prove an external identity provider.", "The read-only Git daemon is anonymous local course transport, not production authentication or authorization.", "The Git revision probe runs in a hardened disposable client on the Kind network; it does not prove host bridge reachability.", "Node-container docker stats measures the named course node, not the Docker Desktop VM working set.", "The authoring-host live run used macOS sleep prevention; caffeinate is not a learner dependency.", "Raw runner command records can contain local filesystem paths; Task 6 must sanitize them before learner publication."] };
+  const report = { schema: "agentic-iac-s10-gitops-lifecycle/v1", result: "IN_PROGRESS", started_at: new Date().toISOString(), exact_names: EXACT, frozen_versions: { kind_image: KIND_IMAGE, argo_chart: CHART_VERSION, argo_application: APP_VERSION, git_image: GIT_IMAGE }, revisions, lineage, approvals, commands: records, measurements, observations: { pre_run_inventory: preRunInventory }, cleanup: {}, proof_limits: ["The pre-run inventory records exact relative cache facts; it does not label the host or run globally cold or warm.", "Kubernetes events are complete only when the course namespaces return within the frozen server limits; log capture requires exactly five Argo CD and three inference regular-container targets bound to frozen labels and stable apps/v1 owners, and excludes init-container and previous-instance logs.", "Local course approval records bind revisions but do not prove an external identity provider.", "The read-only Git daemon is anonymous local course transport, not production authentication or authorization.", "The Git revision probe runs in a hardened disposable client on the Kind network; it does not prove host bridge reachability.", "Node-container docker stats measures the named course node, not the Docker Desktop VM working set.", "The authoring-host live run used macOS sleep prevention; caffeinate is not a learner dependency.", "Raw runner command records can contain local filesystem paths; Task 6 must sanitize them before learner publication."] };
   let mirrorActive = false;
   const gateOwnerships = [];
   const clusterState = { createAttempted: false, created: false, nodeId: null, partialCleanupAbsence: null };

@@ -146,53 +146,162 @@ test("pre-run inventory records absent image and Helm caches on a clean host", (
   rmSync(root, { recursive: true });
 });
 
-test("pre-cleanup evidence captures complete bounded events and sanitized regular-container logs", () => {
+const kubernetesLogTargets = [
+  { namespace: "argocd", component: "application-controller", workloadKind: "StatefulSet", workload: "argocd-application-controller", container: "application-controller", pod: "argocd-application-controller-0" },
+  { namespace: "argocd", component: "applicationset-controller", workloadKind: "Deployment", workload: "argocd-applicationset-controller", container: "applicationset-controller", pod: "argocd-applicationset-controller-7c9f8b6c45-q2vwx" },
+  { namespace: "argocd", component: "redis", workloadKind: "Deployment", workload: "argocd-redis", container: "redis", pod: "argocd-redis-6f7d8c9b45-r4nd0" },
+  { namespace: "argocd", component: "repo-server", workloadKind: "Deployment", workload: "argocd-repo-server", container: "repo-server", pod: "argocd-repo-server-5b8c7d6f49-p9x2k" },
+  { namespace: "argocd", component: "server", workloadKind: "Deployment", workload: "argocd-server", container: "server", pod: "argocd-server-8d6f7b5c49-z1m3n" },
+  { namespace: "inference", component: "api", workloadKind: "Deployment", workload: "inference-platform-api", container: "api", pod: "inference-platform-api-765d9f8b4c-t6h2j" },
+  { namespace: "inference", component: "dependencies", workloadKind: "Deployment", workload: "inference-platform-dependencies", container: "dependencies", pod: "inference-platform-dependencies-6c8d7f5b49-w4p7s" },
+  { namespace: "inference", component: "worker", workloadKind: "Deployment", workload: "inference-platform-worker", container: "worker", pod: "inference-platform-worker-9b7d6c5f48-k8v3q" },
+];
+
+function targetLabels(target, { workload = false } = {}) {
+  if (target.namespace === "argocd") return {
+    "app.kubernetes.io/name": target.workload,
+    "app.kubernetes.io/instance": "argocd",
+    "app.kubernetes.io/component": target.component,
+    "app.kubernetes.io/managed-by": "Helm",
+    "app.kubernetes.io/part-of": "argocd",
+    "app.kubernetes.io/version": "v3.5.1",
+    "helm.sh/chart": "argo-cd-10.4.0",
+  };
+  return {
+    "app.kubernetes.io/name": "inference-platform",
+    "app.kubernetes.io/component": target.component,
+    ...(workload ? { "app.kubernetes.io/managed-by": "Helm" } : {}),
+  };
+}
+
+function kubernetesEvidenceFixture({ mutatePods = (pods) => pods, failLogs = false } = {}) {
+  const calls = { logs: [], raw: [] };
+  const resources = new Map();
+  const pods = Object.fromEntries(["argocd", "inference"].map((namespace) => [namespace, []]));
+  for (const [index, target] of kubernetesLogTargets.entries()) {
+    const workloadUid = `workload-uid-${index}`;
+    const workloadResource = target.workloadKind === "Deployment" ? "deployments" : "statefulsets";
+    resources.set(`/apis/apps/v1/namespaces/${target.namespace}/${workloadResource}/${target.workload}`, {
+      apiVersion: "apps/v1", kind: target.workloadKind,
+      metadata: { namespace: target.namespace, name: target.workload, uid: workloadUid, labels: targetLabels(target, { workload: true }) },
+      spec: { selector: { matchLabels: targetLabels(target) }, template: { metadata: { labels: targetLabels(target) }, spec: { containers: [{ name: target.container }] } } },
+    });
+    let owner = { apiVersion: "apps/v1", kind: target.workloadKind, name: target.workload, uid: workloadUid, controller: true, blockOwnerDeletion: true };
+    const labels = { ...targetLabels(target) };
+    if (target.workloadKind === "Deployment") {
+      const replicaSet = `${target.workload}-rs-${index}`;
+      const replicaSetUid = `replicaset-uid-${index}`;
+      owner = { apiVersion: "apps/v1", kind: "ReplicaSet", name: replicaSet, uid: replicaSetUid, controller: true, blockOwnerDeletion: true };
+      resources.set(`/apis/apps/v1/namespaces/${target.namespace}/replicasets/${replicaSet}`, {
+        apiVersion: "apps/v1", kind: "ReplicaSet",
+        metadata: {
+          namespace: target.namespace, name: replicaSet, uid: replicaSetUid,
+          labels: { ...labels, "pod-template-hash": `hash-${index}` },
+          ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: target.workload, uid: workloadUid, controller: true, blockOwnerDeletion: true }],
+        },
+        spec: { selector: { matchLabels: { ...labels, "pod-template-hash": `hash-${index}` } }, template: { metadata: { labels } } },
+      });
+      labels["pod-template-hash"] = `hash-${index}`;
+    }
+    pods[target.namespace].push({
+      metadata: { namespace: target.namespace, name: target.pod, uid: `pod-uid-${index}`, labels, ownerReferences: [owner] },
+      spec: { containers: [{ name: target.container, image: "example.invalid/course@sha256:deadbeef" }] },
+      status: { phase: "Running", containerStatuses: [{ name: target.container, ready: true, restartCount: 0 }] },
+    });
+  }
+  const mutatedPods = mutatePods(structuredClone(pods));
   const event = (namespace, name) => ({
+    apiVersion: "v1", kind: "Event",
     metadata: { namespace, name, creationTimestamp: "2026-08-31T00:00:00Z" },
     involvedObject: { kind: "Pod", name }, reason: "Started", type: "Normal", count: 1,
     message: "token=s10-runtime-token path=/Users/author/course Authorization: Bearer abc.def.ghi",
   });
-  const pod = (namespace, name, containers) => ({ metadata: { namespace, name }, spec: { containers: containers.map((container) => ({ name: container })) } });
   const executor = (tool, args) => {
     assert.equal(tool, "kubectl");
+    if (args.includes("logs")) {
+      calls.logs.push(args);
+      if (failLogs) throw new Error("log transport failed");
+      return { exit: 0, stdout: args.includes("application-controller") ? "x".repeat(16_384) : "2026-08-31T00:00:00Z token=s10-runtime-token reading /private/var/folders/secret\nready", stderr: "" };
+    }
     const raw = args.at(-1);
-    if (args.includes("--raw") && raw.includes("/events?limit=100")) {
-      const namespace = raw.includes("/argocd/") ? "argocd" : "inference";
-      return { exit: 0, stdout: JSON.stringify({ metadata: { continue: "" }, items: [event(namespace, `${namespace}-pod`)] }), stderr: "" };
-    }
-    if (args.includes("--raw") && raw.includes("/pods?limit=50")) {
-      const namespace = raw.includes("/argocd/") ? "argocd" : "inference";
-      const containers = namespace === "argocd" ? ["controller"] : ["api", "sidecar"];
-      return { exit: 0, stdout: JSON.stringify({ metadata: { continue: "" }, items: [pod(namespace, `${namespace}-pod`, containers)] }), stderr: "" };
-    }
-    if (args.includes("logs")) return { exit: 0, stdout: args.includes("controller") ? "x".repeat(16_384) : "2026-08-31T00:00:00Z token=s10-runtime-token reading /private/var/folders/secret\nready", stderr: "" };
+    calls.raw.push(raw);
+    const url = new URL(raw, "https://kubernetes.invalid");
+    const eventMatch = url.pathname.match(/^\/api\/v1\/namespaces\/([^/]+)\/events$/);
+    if (eventMatch) return { exit: 0, stdout: JSON.stringify({ apiVersion: "v1", kind: "EventList", metadata: { continue: "" }, items: [event(eventMatch[1], `${eventMatch[1]}-pod`)] }), stderr: "" };
+    const podMatch = url.pathname.match(/^\/api\/v1\/namespaces\/([^/]+)\/pods$/);
+    if (podMatch) return { exit: 0, stdout: JSON.stringify({ apiVersion: "v1", kind: "PodList", metadata: { continue: "" }, items: mutatedPods[podMatch[1]] }), stderr: "" };
+    const resource = resources.get(url.pathname);
+    if (resource) return { exit: 0, stdout: JSON.stringify(resource), stderr: "" };
     throw new Error(`unexpected kubectl arguments: ${args.join(" ")}`);
   };
+  return { calls, executor, pods: mutatedPods };
+}
+
+test("pre-cleanup evidence validates eight stable owners before capturing dynamic-Pod logs", () => {
+  const { calls, executor } = kubernetesEvidenceFixture();
   const evidence = captureKubernetesEvidence({ executor, now: () => 1_788_134_400_000 });
   assert.equal(evidence.schema, "agentic-iac-s10-kubernetes-evidence/v1");
   assert.equal(evidence.events.length, 2);
   assert.ok(evidence.events.every((entry) => entry.complete === true && entry.server_limit === 100 && entry.total_returned === 1));
-  assert.equal(evidence.logs.length, 3);
+  assert.equal(evidence.logs.length, 8);
+  assert.equal(calls.logs.length, 8);
+  assert.deepEqual(evidence.logs.map((entry) => entry.target_id).sort(), kubernetesLogTargets.map((target) => `${target.namespace}/${target.workload}`).sort());
+  assert.deepEqual(evidence.logs.map((entry) => entry.pod).sort(), kubernetesLogTargets.map((target) => target.pod).sort());
+  assert.ok(evidence.logs.every((entry) => ["Deployment", "StatefulSet"].includes(entry.owner.kind) && entry.owner.name === entry.workload));
   assert.ok(evidence.logs.every((entry) => entry.tail_lines === 200 && entry.limit_bytes === 16384 && /^[0-9a-f]{64}$/.test(entry.sanitized_sha256)));
-  assert.equal(evidence.logs.find((entry) => entry.container === "controller").source_limit_reached, true);
+  assert.equal(evidence.logs.find((entry) => entry.container === "application-controller").source_limit_reached, true);
   assert.equal(evidence.logs.find((entry) => entry.container === "api").source_limit_reached, false);
   assert.ok(evidence.logs.every((entry) => typeof entry.sanitizer_truncated === "boolean" && !("truncated" in entry)));
   assert.doesNotMatch(JSON.stringify(evidence), /s10-runtime-token|\/Users\/|\/private\/var|Bearer abc|token=/i);
   assert.match(JSON.stringify(evidence), /REDACTED/);
 });
 
+test("pre-cleanup evidence rejects a missing expected component before reading any log", () => {
+  const fixture = kubernetesEvidenceFixture({ mutatePods: (pods) => { pods.inference = pods.inference.filter((pod) => pod.metadata.labels["app.kubernetes.io/component"] !== "worker"); return pods; } });
+  assert.throws(() => captureKubernetesEvidence({ executor: fixture.executor }), /KUBERNETES_EVIDENCE_CAPTURE_FAILED/);
+  assert.equal(fixture.calls.logs.length, 0);
+});
+
+test("pre-cleanup evidence rejects an unexpected sidecar before reading any log", () => {
+  const fixture = kubernetesEvidenceFixture({ mutatePods: (pods) => { pods.inference[0].spec.containers.push({ name: "unreviewed-sidecar", image: "attacker.invalid/sidecar:latest" }); return pods; } });
+  assert.throws(() => captureKubernetesEvidence({ executor: fixture.executor }), /KUBERNETES_EVIDENCE_CAPTURE_FAILED/);
+  assert.equal(fixture.calls.logs.length, 0);
+});
+
+test("pre-cleanup evidence rejects an extra Pod before reading any log", () => {
+  const fixture = kubernetesEvidenceFixture({ mutatePods: (pods) => { pods.argocd.push(structuredClone(pods.argocd[1])); pods.argocd.at(-1).metadata.name = "argocd-applicationset-controller-extra-pod"; pods.argocd.at(-1).metadata.uid = "extra-pod-uid"; return pods; } });
+  assert.throws(() => captureKubernetesEvidence({ executor: fixture.executor }), /KUBERNETES_EVIDENCE_CAPTURE_FAILED/);
+  assert.equal(fixture.calls.logs.length, 0);
+});
+
+test("pre-cleanup evidence rejects a replaced expected container before reading any log", () => {
+  const fixture = kubernetesEvidenceFixture({ mutatePods: (pods) => { pods.argocd[2].spec.containers = [{ name: "arbitrary-container", image: "attacker.invalid/arbitrary:latest" }]; return pods; } });
+  assert.throws(() => captureKubernetesEvidence({ executor: fixture.executor }), /KUBERNETES_EVIDENCE_CAPTURE_FAILED/);
+  assert.equal(fixture.calls.logs.length, 0);
+});
+
+test("pre-cleanup evidence rejects duplicate stable target identities before reading any log", () => {
+  const fixture = kubernetesEvidenceFixture({ mutatePods: (pods) => { pods.argocd[4] = structuredClone(pods.argocd[1]); pods.argocd[4].metadata.name = "argocd-applicationset-controller-second-dynamic-pod"; pods.argocd[4].metadata.uid = "duplicate-pod-uid"; return pods; } });
+  assert.throws(() => captureKubernetesEvidence({ executor: fixture.executor }), /KUBERNETES_EVIDENCE_CAPTURE_FAILED/);
+  assert.equal(fixture.calls.logs.length, 0);
+});
+
+test("pre-cleanup evidence rejects a Pod whose owner does not resolve to the stable workload", () => {
+  const fixture = kubernetesEvidenceFixture({ mutatePods: (pods) => { pods.inference[1].metadata.ownerReferences[0].name = "foreign-replicaset"; return pods; } });
+  assert.throws(() => captureKubernetesEvidence({ executor: fixture.executor }), /KUBERNETES_EVIDENCE_CAPTURE_FAILED/);
+  assert.equal(fixture.calls.logs.length, 0);
+});
+
+test("pre-cleanup evidence rejects a Pod missing an exact course identity label", () => {
+  const fixture = kubernetesEvidenceFixture({ mutatePods: (pods) => { delete pods.argocd[3].metadata.labels["app.kubernetes.io/managed-by"]; return pods; } });
+  assert.throws(() => captureKubernetesEvidence({ executor: fixture.executor }), /KUBERNETES_EVIDENCE_CAPTURE_FAILED/);
+  assert.equal(fixture.calls.logs.length, 0);
+});
+
 test("pre-cleanup evidence fails closed when any required container log cannot be captured", () => {
-  const executor = (_tool, args) => {
-    const raw = args.at(-1);
-    if (args.includes("--raw") && raw.includes("/events?limit=100")) return { exit: 0, stdout: JSON.stringify({ metadata: { continue: "" }, items: [] }), stderr: "" };
-    if (args.includes("--raw") && raw.includes("/pods?limit=50")) {
-      const namespace = raw.includes("/argocd/") ? "argocd" : "inference";
-      return { exit: 0, stdout: JSON.stringify({ metadata: { continue: "" }, items: [{ metadata: { namespace, name: `${namespace}-pod` }, spec: { containers: [{ name: "main" }] } }] }), stderr: "" };
-    }
-    if (args.includes("logs")) throw new Error("log transport failed");
-    throw new Error("unexpected command");
-  };
-  assert.throws(() => captureKubernetesEvidence({ executor }), /KUBERNETES_EVIDENCE_CAPTURE_FAILED/);
+  const fixture = kubernetesEvidenceFixture({ failLogs: true });
+  assert.throws(() => captureKubernetesEvidence({ executor: fixture.executor }), /KUBERNETES_EVIDENCE_CAPTURE_FAILED/);
+  assert.equal(fixture.calls.logs.length, 1);
 });
 
 test("approval binds independent human reviewer to one exact revision and purpose", () => {
