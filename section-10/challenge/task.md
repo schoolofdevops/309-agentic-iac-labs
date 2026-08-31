@@ -44,12 +44,14 @@ kubectl --context kind-agentic-iac-s10 \
 sleep 3
 ```
 
-[ Expected output ]
+[ sample output ]
 
 ```text
 deployment.apps/inference-platform-api patched
 application.argoproj.io/inference-platform annotated
 ```
+
+The printed JSON patch appears before these two stable command-result lines.
 
 ## Collect Git evidence
 
