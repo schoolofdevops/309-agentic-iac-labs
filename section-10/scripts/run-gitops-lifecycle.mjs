@@ -21,6 +21,10 @@ export const EXACT = Object.freeze({
   gitContainer: "agentic-iac-s10-git",
 });
 
+export const HUMAN_APPROVAL_SCHEMA = "agentic-iac-s10-human-approval/v1";
+export const HUMAN_APPROVAL_IDENTITIES = Object.freeze({ approved_by: "human-platform-reviewer", requested_by: "agent-author" });
+export const HUMAN_APPROVAL_KEYS = Object.freeze(["approved", "approved_by", "purpose", "requested_by", "revision", "schema"]);
+
 function fail(code, detail = "") { throw new Error(`${code}${detail ? `: ${detail}` : ""}`); }
 
 export function assertRuntimeNames(names) {
@@ -45,12 +49,11 @@ export function assertApprovedRevision(path, revision, purpose, { stat = lstatSy
   if (!before.isFile() || before.isSymbolicLink() || (before.mode & 0o022) !== 0) fail("APPROVAL_RECORD_INVALID");
   const raw = read(path, "utf8");
   const value = JSON.parse(raw);
-  const allowedKeys = ["approved", "approved_by", "purpose", "requested_by", "revision", "schema"];
-  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(allowedKeys)) fail("APPROVAL_KEYS_INVALID");
-  if (value.schema !== "agentic-iac-s10-human-approval/v1"
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(HUMAN_APPROVAL_KEYS)) fail("APPROVAL_KEYS_INVALID");
+  if (value.schema !== HUMAN_APPROVAL_SCHEMA
     || value.approved !== true
-    || value.approved_by !== "human-platform-reviewer"
-    || value.requested_by !== "agent-author") fail("APPROVAL_RECORD_INVALID");
+    || value.approved_by !== HUMAN_APPROVAL_IDENTITIES.approved_by
+    || value.requested_by !== HUMAN_APPROVAL_IDENTITIES.requested_by) fail("APPROVAL_RECORD_INVALID");
   if (value.revision !== revision) fail("UNAPPROVED_REVISION");
   if (value.purpose !== purpose) fail("APPROVAL_PURPOSE_MISMATCH");
   const after = stat(path);
