@@ -180,16 +180,18 @@ function runtimeSnapshot({ currentRevision = "1".repeat(40), imageTag = "s10-v1"
   };
 }
 
-test("production module exposes no injectable gate-publishing function", () => {
+test("production opener retains the exact gate binding through foreground approval", () => {
   assert.equal(opener.openLearnerApprovalGate, undefined);
   assert.equal(opener.openGate, undefined);
   const source = readFileSync(openerSource, "utf8");
   assert.doesNotMatch(source, /(?:create|open)LearnerApprovalGate\([^)]*,\s*\{/);
   assert.doesNotMatch(source, /\b(?:kubeRun|openGate|driftObservationMs|sleep)\s*=/);
   assert.match(source, /openApprovalGate\(boundary\.approval, input\.revision, input\.purpose, observed\)/);
-  assert.match(source, /writeApprovalGateHandoff\(gate\.binding\)/);
   assert.match(source, /assertApprovalBoundaryUnchanged\(boundary, \{ gateExpected: true, gateBinding: gate\.binding \}\)/);
-  assert.match(source, /assertApprovalGateHandoff\(handoff\)/);
+  assert.match(source, /gateBinding: gate\.binding/);
+  assert.match(source, /completeInteractiveApproval\(\{[\s\S]*gateBinding: result\.gateBinding/);
+  assert.match(source, /JSON\.stringify\(result\.gateBinding\.gate, null, 2\)/);
+  assert.doesNotMatch(source, /binding\.json|writeApprovalGateHandoff|assertApprovalGateHandoff|\.sock|startBoundApprovalSession/);
   assert.match(source, /removeOwnedApprovalGate\(gate\.ownership\)/);
 });
 

@@ -9,15 +9,12 @@ import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
 import {
-  APPROVAL_GATE_HANDOFF_SUFFIX,
   EXACT,
   assertApprovalGateBinding,
-  assertApprovalGateHandoff,
   openApprovalGate,
   removeOwnedApprovalGate,
-  removeOwnedApprovalGateHandoff,
-  writeApprovalGateHandoff,
 } from "./run-gitops-lifecycle.mjs";
+import { completeInteractiveApproval } from "./approve-gitops-revision.mjs";
 import { DAEMON_COMMAND, IMAGE as GIT_IMAGE, productionRuntime } from "./start-git-mirror.mjs";
 
 const PROMOTION_PATH = "section-10/starter/gitops/chart/values.yaml";
@@ -255,7 +252,7 @@ export function bindApprovalBoundary({ source: sourceInput, approval: approvalIn
   try { marker = identity(markerPath, "file"); } catch { fail("APPROVAL_MARKER_INVALID"); }
   if (marker.mode !== 0o400 || marker.owner !== approvalRoot.owner || marker.size !== Buffer.byteLength(APPROVAL_MARKER_BYTES)
     || readFileSync(marker.canonical, "utf8") !== APPROVAL_MARKER_BYTES) fail("APPROVAL_MARKER_INVALID");
-  if (existsSync(approval) || existsSync(`${approval}.gate.json`) || existsSync(`${approval}.gate.json${APPROVAL_GATE_HANDOFF_SUFFIX}`)) fail("PREEXISTING_APPROVAL_STATE");
+  if (existsSync(approval) || existsSync(`${approval}.gate.json`)) fail("PREEXISTING_APPROVAL_STATE");
   return { approval, approvalRoot, marker, source, sourceIdentity, temporaryRoot };
 }
 
@@ -597,26 +594,26 @@ async function createLearnerApprovalGate(input) {
   assertApprovalBoundaryUnchanged(boundary, { gateExpected: false });
 
   const gate = openApprovalGate(boundary.approval, input.revision, input.purpose, observed);
-  let handoff;
   try {
-    handoff = writeApprovalGateHandoff(gate.binding);
     assertApprovalBoundaryUnchanged(boundary, { gateExpected: true, gateBinding: gate.binding });
-    assertApprovalGateHandoff(handoff);
     assertProductionEnvironmentUnchanged(environment);
     inspectGitCandidate({ source: boundary.source, revision: input.revision, currentRevision, purpose: input.purpose }, { gitRun: environment.gitRun });
     assertStableValidatedRuntime(initial, collectRuntimeSnapshot(environment, input.purpose), input.purpose, currentRevision);
     assertApprovalBoundaryUnchanged(boundary, { gateExpected: true, gateBinding: gate.binding });
-    assertApprovalGateHandoff(handoff);
+    return {
+      approval: boundary.approval,
+      gate: gate.binding.path,
+      gateBinding: gate.binding,
+      observed,
+      purpose: input.purpose,
+      revision: input.revision,
+    };
   } catch (error) {
     let cleanupFailure;
-    if (handoff) {
-      try { removeOwnedApprovalGateHandoff(handoff.ownership); } catch (cleanupError) { cleanupFailure = cleanupError; }
-    }
     try { removeOwnedApprovalGate(gate.ownership); } catch (cleanupError) { cleanupFailure ??= cleanupError; }
     if (cleanupFailure) fail("GATE_POSTCHECK_AND_CLEANUP_FAILED", `${error.message}; ${cleanupFailure.message}`);
     throw error;
   }
-  return { approval: boundary.approval, gate: gate.binding.path, observed, purpose: input.purpose, revision: input.revision };
 }
 
 async function main() {
@@ -624,9 +621,17 @@ async function main() {
     const result = await createLearnerApprovalGate(parseArgs(process.argv.slice(2)));
     process.stdout.write(`Approval gate opened for ${result.revision} (${result.purpose}).\n`);
     process.stdout.write(`Gate: ${result.gate}\n`);
+    process.stdout.write(`${JSON.stringify(result.gateBinding.gate, null, 2)}\n`);
+    const approval = await completeInteractiveApproval({
+      gateBinding: result.gateBinding,
+      output: result.approval,
+      purpose: result.purpose,
+      revision: result.revision,
+    });
+    process.stdout.write(`Approved revision ${approval.revision} for ${approval.purpose}.\n`);
   } catch (error) {
     const code = /^[A-Z_]+/.test(error?.message ?? "") ? error.message : `GATE_OPEN_FAILED: ${error.message}`;
-    process.stderr.write(`Approval gate not opened: ${code}.\n`);
+    process.stderr.write(`Approval not completed: ${code}.\n`);
     process.exitCode = 1;
   }
 }

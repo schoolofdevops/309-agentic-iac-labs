@@ -24,8 +24,6 @@ export const EXACT = Object.freeze({
 export const HUMAN_APPROVAL_SCHEMA = "agentic-iac-s10-human-approval/v1";
 export const HUMAN_APPROVAL_IDENTITIES = Object.freeze({ approved_by: "human-platform-reviewer", requested_by: "agent-author" });
 export const HUMAN_APPROVAL_KEYS = Object.freeze(["approved", "approved_by", "purpose", "requested_by", "revision", "schema"]);
-export const APPROVAL_GATE_HANDOFF_SCHEMA = "agentic-iac-s10-approval-gate-binding/v1";
-export const APPROVAL_GATE_HANDOFF_SUFFIX = ".binding.json";
 
 function fail(code, detail = "") { throw new Error(`${code}${detail ? `: ${detail}` : ""}`); }
 
@@ -104,69 +102,6 @@ export function assertApprovalGateBinding(binding, options = {}) {
     || current.file.identity_sha256 !== binding.file.identity_sha256
     || JSON.stringify(current.gate) !== JSON.stringify(binding.gate)) fail("APPROVAL_GATE_BINDING_CHANGED");
   return current;
-}
-
-function exactObjectKeys(value, keys) {
-  return value != null && typeof value === "object" && !Array.isArray(value)
-    && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
-}
-
-function validSerializedGateBinding(binding, gatePath) {
-  return exactObjectKeys(binding, ["file", "gate", "parent", "path"])
-    && binding.path === gatePath
-    && exactObjectKeys(binding.parent, ["device", "inode", "mode", "owner", "path"])
-    && binding.parent.path === dirname(gatePath)
-    && [binding.parent.device, binding.parent.inode, binding.parent.owner].every((value) => typeof value === "string" && /^[0-9]+$/.test(value))
-    && Number.isInteger(binding.parent.mode)
-    && exactObjectKeys(binding.file, ["bytes", "ctime_ms", "device", "identity_sha256", "inode", "mode", "mtime_ms", "owner"])
-    && [binding.file.device, binding.file.inode, binding.file.owner].every((value) => typeof value === "string" && /^[0-9]+$/.test(value))
-    && Number.isInteger(binding.file.bytes) && binding.file.bytes > 0 && binding.file.mode === 0o600
-    && Number.isFinite(binding.file.ctime_ms) && Number.isFinite(binding.file.mtime_ms)
-    && typeof binding.file.identity_sha256 === "string" && /^[0-9a-f]{64}$/.test(binding.file.identity_sha256)
-    && binding.gate != null && typeof binding.gate === "object" && !Array.isArray(binding.gate);
-}
-
-export function readApprovalGateHandoff(gatePath, options = {}) {
-  const expectedGatePath = resolve(gatePath);
-  const path = `${expectedGatePath}${APPROVAL_GATE_HANDOFF_SUFFIX}`;
-  const ownership = readApprovalGateBinding(path, options);
-  const record = ownership.gate;
-  if (ownership.file.mode !== 0o400
-    || !exactObjectKeys(record, ["binding", "schema"])
-    || record.schema !== APPROVAL_GATE_HANDOFF_SCHEMA
-    || !validSerializedGateBinding(record.binding, expectedGatePath)) fail("APPROVAL_GATE_HANDOFF_INVALID");
-  try { assertApprovalGateBinding(record.binding, options); } catch { fail("APPROVAL_GATE_HANDOFF_CHANGED"); }
-  return { binding: record.binding, ownership, path };
-}
-
-export function assertApprovalGateHandoff(handoff, options = {}) {
-  let current;
-  try { current = assertApprovalGateBinding(handoff.ownership, options); } catch { fail("APPROVAL_GATE_HANDOFF_CHANGED"); }
-  if (!exactObjectKeys(current.gate, ["binding", "schema"])
-    || current.gate.schema !== APPROVAL_GATE_HANDOFF_SCHEMA
-    || JSON.stringify(current.gate.binding) !== JSON.stringify(handoff.binding)) fail("APPROVAL_GATE_HANDOFF_CHANGED");
-  try { assertApprovalGateBinding(handoff.binding, options); } catch { fail("APPROVAL_GATE_HANDOFF_CHANGED"); }
-  return handoff;
-}
-
-export function writeApprovalGateHandoff(binding) {
-  assertApprovalGateBinding(binding);
-  const path = `${binding.path}${APPROVAL_GATE_HANDOFF_SUFFIX}`;
-  if (existsSync(path)) fail("PREEXISTING_APPROVAL_GATE_HANDOFF");
-  writeFileSync(path, `${JSON.stringify({ schema: APPROVAL_GATE_HANDOFF_SCHEMA, binding })}\n`, {
-    encoding: "utf8", flag: "wx", mode: 0o400,
-  });
-  const handoff = readApprovalGateHandoff(binding.path);
-  if (JSON.stringify(handoff.binding) !== JSON.stringify(binding)) fail("APPROVAL_GATE_HANDOFF_CHANGED");
-  return handoff;
-}
-
-export function removeOwnedApprovalGateHandoff(ownership) {
-  if (!existsSync(ownership.path)) return false;
-  try { assertApprovalGateBinding(ownership); } catch { fail("APPROVAL_GATE_HANDOFF_OWNERSHIP_CHANGED"); }
-  unlinkSync(ownership.path);
-  if (existsSync(ownership.path)) fail("APPROVAL_GATE_HANDOFF_CLEANUP_INCOMPLETE");
-  return true;
 }
 
 export function assertRuntimeNames(names) {
