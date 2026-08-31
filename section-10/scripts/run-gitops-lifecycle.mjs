@@ -4,7 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { IMAGE as GIT_IMAGE, resolveRancherDesktopDockerHost, runGitProbe, startGitMirror } from "./start-git-mirror.mjs";
@@ -161,6 +161,8 @@ const KIND_IMAGE = "kindest/node@sha256:3489c7674813ba5d8b1a9977baea8a6e553784da
 const WORKLOAD_IMAGES = ["309-agentic-iac/inference-platform:s10-v1", "309-agentic-iac/inference-platform:s10-v2"];
 const CHART_VERSION = "10.4.0";
 const APP_VERSION = "3.5.1";
+const ARGO_SOURCE_IMAGES = ["ecr-public.aws.com/docker/library/redis:8.6.4-alpine", "quay.io/argoproj/argocd:v3.5.1"];
+const CHART_ARCHIVE_SHA256 = "5abb71c17bc082e13dc3d90023972f871ea8e1dfc26d8f3218ceade215b971d5";
 const sectionRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const repositoryRoot = resolve(sectionRoot, "..");
 const trustedTemporaryDirectory = realpathSync(tmpdir());
@@ -272,6 +274,152 @@ export function transportTagFor(image) {
   };
   if (!Object.hasOwn(tags, image)) fail("ARGO_IMAGE_SET_CHANGED", image);
   return tags[image];
+}
+
+function safeFileIdentity(path) {
+  if (!existsSync(path)) return { present: false };
+  const before = lstatSync(path);
+  if (!before.isFile() || before.isSymbolicLink()) fail("CACHE_FILE_INVALID");
+  const bytes = readFileSync(path);
+  const after = lstatSync(path);
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+    || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) fail("CACHE_FILE_CHANGED_DURING_READ");
+  return { present: true, bytes: after.size, mtime: after.mtime.toISOString(), sha256: sha256(bytes) };
+}
+
+function parseHelmEnvironment(raw) {
+  const values = {};
+  for (const line of String(raw).split(/\r?\n/).filter(Boolean)) {
+    const match = line.match(/^([A-Z_]+)=(?:"([^"]*)"|(.*))$/);
+    if (match) values[match[1]] = match[2] ?? match[3];
+  }
+  return values;
+}
+
+function trustedHelmPath(path, trustedHome) {
+  const home = realpathSync(trustedHome);
+  let ancestor = resolve(path ?? "");
+  const suffix = [];
+  while (!existsSync(ancestor)) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor) fail("HELM_CACHE_PATH_INVALID");
+    suffix.unshift(basename(ancestor));
+    ancestor = parent;
+  }
+  const candidate = join(realpathSync(ancestor), ...suffix);
+  const child = relative(home, candidate);
+  if (!child || child === ".." || child.startsWith(`..${sep}`) || resolve(home, child) !== candidate) fail("HELM_CACHE_PATH_INVALID");
+  return candidate;
+}
+
+function inspectCachedImage(reference, executor) {
+  const format = '{"id":{{json .Id}},"repo_digests":{{json .RepoDigests}},"architecture":{{json .Architecture}},"size":{{json .Size}}}';
+  const result = executor("docker", ["image", "inspect", reference, "--format", format], { accepted: [0, 1], timeout: 30_000 });
+  if (result.exit === 1 && /No such image/i.test(result.stderr ?? "")) return { reference, present: false };
+  if (result.exit !== 0) fail("IMAGE_CACHE_OBSERVATION_FAILED", reference);
+  let value;
+  try { value = JSON.parse(result.stdout); } catch (error) { fail("IMAGE_CACHE_OBSERVATION_INVALID", error.message); }
+  if (!/^sha256:[0-9a-f]{64}$/.test(value.id ?? "") || !Array.isArray(value.repo_digests)
+    || typeof value.architecture !== "string" || !Number.isFinite(value.size)) fail("IMAGE_CACHE_OBSERVATION_INVALID", reference);
+  return { reference, present: true, identity: { id: value.id, repo_digests: value.repo_digests, architecture: value.architecture, size: value.size } };
+}
+
+export function capturePreRunInventory({ executor = execute, trustedHome = userInfo().homedir, now = Date.now } = {}) {
+  const imageReferences = [KIND_IMAGE, GIT_IMAGE, ...ARGO_SOURCE_IMAGES, ...ARGO_SOURCE_IMAGES.map(transportTagFor), ...WORKLOAD_IMAGES];
+  const images = imageReferences.map((reference) => inspectCachedImage(reference, executor));
+  const helmEnvironment = parseHelmEnvironment(executor("helm", ["env"], { timeout: 30_000 }).stdout);
+  const contentCache = trustedHelmPath(helmEnvironment.HELM_CONTENT_CACHE, trustedHome);
+  const repositoryCache = trustedHelmPath(helmEnvironment.HELM_REPOSITORY_CACHE, trustedHome);
+  const repositoryConfig = trustedHelmPath(helmEnvironment.HELM_REPOSITORY_CONFIG, trustedHome);
+  let repositories;
+  try { repositories = JSON.parse(executor("helm", ["repo", "list", "-o", "json"], { timeout: 30_000 }).stdout); }
+  catch (error) { fail("HELM_REPOSITORY_OBSERVATION_INVALID", error.message); }
+  if (!Array.isArray(repositories)) fail("HELM_REPOSITORY_OBSERVATION_INVALID");
+  const argo = repositories.filter((entry) => entry?.name === "argo");
+  if (argo.length > 1) fail("HELM_REPOSITORY_OBSERVATION_INVALID", "duplicate argo repository");
+  const configured = argo.length === 1 && argo[0].url === "https://argoproj.github.io/argo-helm";
+  const archive = join(contentCache, CHART_ARCHIVE_SHA256.slice(0, 2), `${CHART_ARCHIVE_SHA256}.chart`);
+  const chartCache = safeFileIdentity(archive);
+  return {
+    schema: "agentic-iac-s10-pre-run-inventory/v1",
+    observed_at: new Date(now()).toISOString(),
+    classification: "facts-only; this inventory does not label the run globally cold or warm",
+    images,
+    helm: {
+      repository: { name: "argo", url: configured ? argo[0].url : null, configured },
+      repository_config: safeFileIdentity(repositoryConfig),
+      repository_index: safeFileIdentity(join(repositoryCache, "argo-index.yaml")),
+      repository_chart_list: safeFileIdentity(join(repositoryCache, "argo-charts.txt")),
+      chart: {
+        name: "argo-cd", version: CHART_VERSION, expected_archive_sha256: CHART_ARCHIVE_SHA256,
+        content_cache: { ...chartCache, identity_matches_expected: chartCache.present && chartCache.sha256 === CHART_ARCHIVE_SHA256 },
+      },
+    },
+  };
+}
+
+function sanitizeEvidenceText(input, maxBytes) {
+  let value = String(input ?? "")
+    .replaceAll("s10-runtime-token", "[REDACTED]")
+    .replace(/\bBearer\s+[^\s"']+/gi, "Bearer [REDACTED]")
+    .replace(/\b(?:authorization|token|password|passwd|secret|api[_-]?key)\b\s*[:=]\s*[^\s,"']+/gi, "[REDACTED]")
+    .replace(/unix:\/\/[^\s"']+/gi, "[PATH_REDACTED]")
+    .replace(/\/(?:Users|home|private|var|tmp|opt|etc)\/(?:[^\s,"']+)/g, "[PATH_REDACTED]");
+  const bytes = Buffer.from(value);
+  const truncated = bytes.length > maxBytes;
+  if (truncated) value = `${bytes.subarray(0, maxBytes).toString("utf8")}\n[TRUNCATED]`;
+  return { text: value, bytes: Buffer.byteLength(value), truncated, sha256: sha256(value) };
+}
+
+function requiredJson(result, label) {
+  if (result?.exit !== 0) fail("KUBERNETES_EVIDENCE_COMMAND_FAILED", label);
+  try { return JSON.parse(result.stdout); } catch (error) { fail("KUBERNETES_EVIDENCE_JSON_INVALID", `${label}: ${error.message}`); }
+}
+
+export function captureKubernetesEvidence({ executor = execute, now = Date.now } = {}) {
+  try {
+    const events = [];
+    const logs = [];
+    for (const namespace of [EXACT.argocdNamespace, EXACT.workloadNamespace]) {
+      const eventPath = `/api/v1/namespaces/${namespace}/events?limit=100`;
+      const eventList = requiredJson(executor("kubectl", ["--context", EXACT.context, "get", "--raw", eventPath], { timeout: 30_000 }), `${namespace} events`);
+      if (!Array.isArray(eventList.items) || eventList.items.length > 100 || eventList.metadata?.continue) fail("KUBERNETES_EVIDENCE_TRUNCATED", `${namespace} events`);
+      const eventItems = eventList.items.map((event) => {
+        const message = sanitizeEvidenceText(event.message ?? event.note ?? "", 1024);
+        return {
+          namespace,
+          name: event.metadata?.name,
+          created_at: event.metadata?.creationTimestamp ?? null,
+          involved_object: { kind: event.involvedObject?.kind ?? event.regarding?.kind ?? null, name: event.involvedObject?.name ?? event.regarding?.name ?? null },
+          type: event.type ?? null, reason: event.reason ?? null, action: event.action ?? null,
+          reporting_controller: event.reportingComponent ?? event.reportingController ?? event.source?.component ?? null,
+          count: event.count ?? event.series?.count ?? null,
+          first_at: event.firstTimestamp ?? event.eventTime ?? null,
+          last_at: event.lastTimestamp ?? event.series?.lastObservedTime ?? null,
+          message: message.text,
+          message_sha256: message.sha256,
+          message_truncated: message.truncated,
+        };
+      }).sort((left, right) => `${left.created_at ?? ""}/${left.name ?? ""}`.localeCompare(`${right.created_at ?? ""}/${right.name ?? ""}`));
+      events.push({ namespace, api: "core/v1", server_limit: 100, total_returned: eventItems.length, complete: true, items: eventItems });
+
+      const podPath = `/api/v1/namespaces/${namespace}/pods?limit=50`;
+      const podList = requiredJson(executor("kubectl", ["--context", EXACT.context, "get", "--raw", podPath], { timeout: 30_000 }), `${namespace} pods`);
+      if (!Array.isArray(podList.items) || podList.items.length > 50 || podList.metadata?.continue) fail("KUBERNETES_EVIDENCE_TRUNCATED", `${namespace} pods`);
+      const containers = podList.items.flatMap((pod) => (pod.spec?.containers ?? []).map((container) => ({ pod: pod.metadata?.name, container: container.name })));
+      for (const target of containers.sort((left, right) => `${left.pod}/${left.container}`.localeCompare(`${right.pod}/${right.container}`))) {
+        if (!/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(target.pod ?? "") || !/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(target.container ?? "")) fail("KUBERNETES_EVIDENCE_TARGET_INVALID");
+        const result = executor("kubectl", ["--context", EXACT.context, "-n", namespace, "logs", target.pod, "-c", target.container, "--tail=200", "--limit-bytes=16384", "--timestamps=true"], { timeout: 30_000 });
+        if (result.exit !== 0) fail("KUBERNETES_EVIDENCE_COMMAND_FAILED", `${namespace}/${target.pod}/${target.container}`);
+        const sanitized = sanitizeEvidenceText(result.stdout, 16_384);
+        const sourceBytes = Buffer.byteLength(result.stdout);
+        logs.push({ namespace, pod: target.pod, container: target.container, tail_lines: 200, limit_bytes: 16_384, source_bytes: sourceBytes, source_limit_reached: sourceBytes >= 16_384, sanitized_bytes: sanitized.bytes, sanitized_sha256: sanitized.sha256, sanitizer_truncated: sanitized.truncated, text: sanitized.text });
+      }
+    }
+    return { schema: "agentic-iac-s10-kubernetes-evidence/v1", captured_at: new Date(now()).toISOString(), events, logs };
+  } catch (error) {
+    fail("KUBERNETES_EVIDENCE_CAPTURE_FAILED", error.message);
+  }
 }
 function jsonCommand(tool, args, options) {
   const result = execute(tool, args, options);
@@ -614,8 +762,9 @@ export async function runGitOpsLifecycle(input) {
   const lineage = verifyRevisionLineage(deliveryRoot, revisions, records);
   assertNoDirectPromotion({ previousRevision: revisions.v1, nextRevision: revisions.v2, mutationCommand: null });
   assertCleanPreflight(observedPreflight(records));
+  const preRunInventory = capturePreRunInventory();
   const sampler = startSampler();
-  const report = { schema: "agentic-iac-s10-gitops-lifecycle/v1", result: "IN_PROGRESS", started_at: new Date().toISOString(), exact_names: EXACT, frozen_versions: { kind_image: KIND_IMAGE, argo_chart: CHART_VERSION, argo_application: APP_VERSION, git_image: GIT_IMAGE }, revisions, lineage, approvals, commands: records, measurements, observations: {}, cleanup: {}, proof_limits: ["Local course approval records bind revisions but do not prove an external identity provider.", "The read-only Git daemon is anonymous local course transport, not production authentication or authorization.", "The Git revision probe runs in a hardened disposable client on the Kind network; it does not prove host bridge reachability.", "Node-container docker stats measures the named course node, not the Docker Desktop VM working set.", "The authoring-host live run used macOS sleep prevention; caffeinate is not a learner dependency.", "Raw runner command records can contain local filesystem paths; Task 6 must sanitize them before learner publication."] };
+  const report = { schema: "agentic-iac-s10-gitops-lifecycle/v1", result: "IN_PROGRESS", started_at: new Date().toISOString(), exact_names: EXACT, frozen_versions: { kind_image: KIND_IMAGE, argo_chart: CHART_VERSION, argo_application: APP_VERSION, git_image: GIT_IMAGE }, revisions, lineage, approvals, commands: records, measurements, observations: { pre_run_inventory: preRunInventory }, cleanup: {}, proof_limits: ["The pre-run inventory records exact relative cache facts; it does not label the host or run globally cold or warm.", "Kubernetes events are complete only when the course namespaces return within the frozen server limits; log capture covers regular containers, not init-container or previous-instance logs.", "Local course approval records bind revisions but do not prove an external identity provider.", "The read-only Git daemon is anonymous local course transport, not production authentication or authorization.", "The Git revision probe runs in a hardened disposable client on the Kind network; it does not prove host bridge reachability.", "Node-container docker stats measures the named course node, not the Docker Desktop VM working set.", "The authoring-host live run used macOS sleep prevention; caffeinate is not a learner dependency.", "Raw runner command records can contain local filesystem paths; Task 6 must sanitize them before learner publication."] };
   let mirrorActive = false;
   const gateOwnerships = [];
   const clusterState = { createAttempted: false, created: false, nodeId: null, partialCleanupAbsence: null };
@@ -627,7 +776,7 @@ export async function runGitOpsLifecycle(input) {
 
     const renderedArgo = execute("helm", ["template", EXACT.release, "argo/argo-cd", "--version", CHART_VERSION, "--namespace", EXACT.argocdNamespace, "-f", join(sectionRoot, "argocd", "values.yaml")], { records, timeout: 120_000 });
     const argoImages = requiredArgoImages(renderedArgo.stdout);
-    if (JSON.stringify(argoImages) !== JSON.stringify(["ecr-public.aws.com/docker/library/redis:8.6.4-alpine", "quay.io/argoproj/argocd:v3.5.1"])) fail("ARGO_IMAGE_SET_CHANGED", JSON.stringify(argoImages));
+    if (JSON.stringify(argoImages) !== JSON.stringify(ARGO_SOURCE_IMAGES)) fail("ARGO_IMAGE_SET_CHANGED", JSON.stringify(argoImages));
     report.observations.argocd_render = { sha256: sha256(renderedArgo.stdout), bytes: Buffer.byteLength(renderedArgo.stdout), images: argoImages };
     for (const image of argoImages) execute("docker", ["pull", "--platform", "linux/arm64", image], { records, timeout: 300_000 });
     report.observations.argocd_source_images = argoImages.map((image) => imageIdentity(image, records));
@@ -724,6 +873,7 @@ export async function runGitOpsLifecycle(input) {
     report.observations.recovery_application = (await waitApplication(revisions.revert, records)).status;
     waitForWorkloadRollouts(records);
     report.observations.recovery_workload = inspectWorkload(records);
+    report.observations.kubernetes_evidence = captureKubernetesEvidence();
     report.result = "PASS";
   } catch (error) {
     report.result = "FAIL"; report.failure = error.message;

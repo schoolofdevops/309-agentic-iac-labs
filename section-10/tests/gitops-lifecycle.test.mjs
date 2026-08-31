@@ -12,6 +12,8 @@ import {
   assertLaterApprovalsAbsent,
   assertApplicationContract,
   assertRuntimeNames,
+  captureKubernetesEvidence,
+  capturePreRunInventory,
   commandEnvironment,
   deadlineAction,
   execute,
@@ -67,6 +69,130 @@ test("the learner runtime selects Docker and includes the verified canonical Ran
 test("the shipped Application is manual and points at the read-only course mirror", () => {
   const manifest = readFileSync(new URL("argocd/application.yaml", sectionRoot), "utf8");
   assert.doesNotThrow(() => assertApplicationContract(manifest));
+});
+
+test("pre-run inventory records exact image and Helm cache facts without leaking cache paths", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-cache-inventory-"));
+  const repositoryCache = join(root, "repository");
+  const contentCache = join(root, "content");
+  const repositoryConfig = join(root, "repositories.yaml");
+  const chartDigest = "5abb71c17bc082e13dc3d90023972f871ea8e1dfc26d8f3218ceade215b971d5";
+  mkdirSync(join(contentCache, chartDigest.slice(0, 2)), { recursive: true });
+  mkdirSync(repositoryCache, { recursive: true });
+  writeFileSync(repositoryConfig, "repositories: []\n");
+  writeFileSync(join(repositoryCache, "argo-index.yaml"), "safe index\n");
+  writeFileSync(join(repositoryCache, "argo-charts.txt"), "safe chart list\n");
+  writeFileSync(join(contentCache, chartDigest.slice(0, 2), `${chartDigest}.chart`), "cached chart bytes\n");
+  const presentId = `sha256:${"a".repeat(64)}`;
+  const executor = (tool, args) => {
+    if (tool === "helm" && args[0] === "env") return { exit: 0, stdout: [
+      `HELM_CONTENT_CACHE=${JSON.stringify(contentCache)}`,
+      `HELM_REPOSITORY_CACHE=${JSON.stringify(repositoryCache)}`,
+      `HELM_REPOSITORY_CONFIG=${JSON.stringify(repositoryConfig)}`,
+    ].join("\n"), stderr: "" };
+    if (tool === "helm" && args[0] === "repo") return { exit: 0, stdout: JSON.stringify([
+      { name: "private", url: "https://token@private.invalid/charts" },
+      { name: "argo", url: "https://argoproj.github.io/argo-helm" },
+    ]), stderr: "" };
+    if (tool === "docker" && args[0] === "image" && args[1] === "inspect") {
+      const reference = args[2];
+      if (reference.endsWith(":s10-v2")) return { exit: 1, stdout: "", stderr: "No such image" };
+      return { exit: 0, stdout: JSON.stringify({ id: presentId, repo_digests: [`${reference}@sha256:${"b".repeat(64)}`], architecture: "arm64", size: 1234 }), stderr: "" };
+    }
+    throw new Error(`unexpected command: ${tool} ${args.join(" ")}`);
+  };
+  const inventory = capturePreRunInventory({ executor, trustedHome: root, now: () => 1_788_134_400_000 });
+  assert.equal(inventory.schema, "agentic-iac-s10-pre-run-inventory/v1");
+  assert.equal(inventory.observed_at, "2026-08-31T00:00:00.000Z");
+  assert.equal(inventory.images.length, 8);
+  assert.equal(inventory.images.find((image) => image.reference.endsWith(":s10-v2")).present, false);
+  assert.equal(inventory.images.find((image) => image.reference.startsWith("kindest/node@")).identity.id, presentId);
+  assert.deepEqual(inventory.helm.repository, { name: "argo", url: "https://argoproj.github.io/argo-helm", configured: true });
+  assert.equal(inventory.helm.chart.version, "10.4.0");
+  assert.equal(inventory.helm.chart.content_cache.present, true);
+  assert.equal(inventory.helm.chart.content_cache.sha256, "b7f101c5e092998032fae488de7312feb9e4bac0cb89edb78a0baee139d92a57");
+  assert.equal(inventory.helm.chart.content_cache.identity_matches_expected, false);
+  assert.equal(inventory.helm.repository_index.present, true);
+  assert.equal(inventory.helm.repository_chart_list.present, true);
+  assert.doesNotMatch(JSON.stringify(inventory), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(JSON.stringify(inventory), /private\.invalid|token@/);
+  rmSync(root, { recursive: true });
+});
+
+test("pre-run inventory records absent image and Helm caches on a clean host", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-empty-cache-"));
+  const executor = (tool, args) => {
+    if (tool === "docker") return { exit: 1, stdout: "", stderr: "No such image" };
+    if (tool === "helm" && args[0] === "env") return { exit: 0, stdout: [
+      `HELM_CONTENT_CACHE=${JSON.stringify(join(root, "missing-content"))}`,
+      `HELM_REPOSITORY_CACHE=${JSON.stringify(join(root, "missing-repository"))}`,
+      `HELM_REPOSITORY_CONFIG=${JSON.stringify(join(root, "missing-config", "repositories.yaml"))}`,
+    ].join("\n"), stderr: "" };
+    if (tool === "helm" && args[0] === "repo") return { exit: 0, stdout: "[]", stderr: "" };
+    throw new Error("unexpected command");
+  };
+  const inventory = capturePreRunInventory({ executor, trustedHome: root });
+  assert.ok(inventory.images.every((image) => image.present === false));
+  assert.equal(inventory.helm.repository.configured, false);
+  assert.equal(inventory.helm.repository_config.present, false);
+  assert.equal(inventory.helm.repository_index.present, false);
+  assert.equal(inventory.helm.repository_chart_list.present, false);
+  assert.deepEqual(inventory.helm.chart.content_cache, { present: false, identity_matches_expected: false });
+  assert.doesNotMatch(JSON.stringify(inventory), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  const unavailable = (tool, args) => tool === "docker"
+    ? { exit: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" }
+    : executor(tool, args);
+  assert.throws(() => capturePreRunInventory({ executor: unavailable, trustedHome: root }), /IMAGE_CACHE_OBSERVATION_FAILED/);
+  rmSync(root, { recursive: true });
+});
+
+test("pre-cleanup evidence captures complete bounded events and sanitized regular-container logs", () => {
+  const event = (namespace, name) => ({
+    metadata: { namespace, name, creationTimestamp: "2026-08-31T00:00:00Z" },
+    involvedObject: { kind: "Pod", name }, reason: "Started", type: "Normal", count: 1,
+    message: "token=s10-runtime-token path=/Users/author/course Authorization: Bearer abc.def.ghi",
+  });
+  const pod = (namespace, name, containers) => ({ metadata: { namespace, name }, spec: { containers: containers.map((container) => ({ name: container })) } });
+  const executor = (tool, args) => {
+    assert.equal(tool, "kubectl");
+    const raw = args.at(-1);
+    if (args.includes("--raw") && raw.includes("/events?limit=100")) {
+      const namespace = raw.includes("/argocd/") ? "argocd" : "inference";
+      return { exit: 0, stdout: JSON.stringify({ metadata: { continue: "" }, items: [event(namespace, `${namespace}-pod`)] }), stderr: "" };
+    }
+    if (args.includes("--raw") && raw.includes("/pods?limit=50")) {
+      const namespace = raw.includes("/argocd/") ? "argocd" : "inference";
+      const containers = namespace === "argocd" ? ["controller"] : ["api", "sidecar"];
+      return { exit: 0, stdout: JSON.stringify({ metadata: { continue: "" }, items: [pod(namespace, `${namespace}-pod`, containers)] }), stderr: "" };
+    }
+    if (args.includes("logs")) return { exit: 0, stdout: args.includes("controller") ? "x".repeat(16_384) : "2026-08-31T00:00:00Z token=s10-runtime-token reading /private/var/folders/secret\nready", stderr: "" };
+    throw new Error(`unexpected kubectl arguments: ${args.join(" ")}`);
+  };
+  const evidence = captureKubernetesEvidence({ executor, now: () => 1_788_134_400_000 });
+  assert.equal(evidence.schema, "agentic-iac-s10-kubernetes-evidence/v1");
+  assert.equal(evidence.events.length, 2);
+  assert.ok(evidence.events.every((entry) => entry.complete === true && entry.server_limit === 100 && entry.total_returned === 1));
+  assert.equal(evidence.logs.length, 3);
+  assert.ok(evidence.logs.every((entry) => entry.tail_lines === 200 && entry.limit_bytes === 16384 && /^[0-9a-f]{64}$/.test(entry.sanitized_sha256)));
+  assert.equal(evidence.logs.find((entry) => entry.container === "controller").source_limit_reached, true);
+  assert.equal(evidence.logs.find((entry) => entry.container === "api").source_limit_reached, false);
+  assert.ok(evidence.logs.every((entry) => typeof entry.sanitizer_truncated === "boolean" && !("truncated" in entry)));
+  assert.doesNotMatch(JSON.stringify(evidence), /s10-runtime-token|\/Users\/|\/private\/var|Bearer abc|token=/i);
+  assert.match(JSON.stringify(evidence), /REDACTED/);
+});
+
+test("pre-cleanup evidence fails closed when any required container log cannot be captured", () => {
+  const executor = (_tool, args) => {
+    const raw = args.at(-1);
+    if (args.includes("--raw") && raw.includes("/events?limit=100")) return { exit: 0, stdout: JSON.stringify({ metadata: { continue: "" }, items: [] }), stderr: "" };
+    if (args.includes("--raw") && raw.includes("/pods?limit=50")) {
+      const namespace = raw.includes("/argocd/") ? "argocd" : "inference";
+      return { exit: 0, stdout: JSON.stringify({ metadata: { continue: "" }, items: [{ metadata: { namespace, name: `${namespace}-pod` }, spec: { containers: [{ name: "main" }] } }] }), stderr: "" };
+    }
+    if (args.includes("logs")) throw new Error("log transport failed");
+    throw new Error("unexpected command");
+  };
+  assert.throws(() => captureKubernetesEvidence({ executor }), /KUBERNETES_EVIDENCE_CAPTURE_FAILED/);
 });
 
 test("approval binds independent human reviewer to one exact revision and purpose", () => {
