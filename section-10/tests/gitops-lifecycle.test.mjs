@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -123,6 +123,37 @@ test("later approvals must be absent initially and a newly created exact record 
   rmSync(root, { recursive: true });
 });
 
+test("an external approval simulator can be cancelled when the runner fails before a gate", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-cancelled-simulator-"));
+  const gate = join(root, "never-created.gate.json");
+  const program = `
+    const fs=require("node:fs");
+    let stopped=false;
+    process.on("SIGTERM",()=>{stopped=true});
+    const deadline=Date.now()+10_000;
+    const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+    (async()=>{
+      while(!fs.existsSync(${JSON.stringify(gate)})) {
+        if(stopped || Date.now()>deadline) throw new Error("approval simulator stopped");
+        await sleep(10);
+      }
+    })().catch(error=>{console.error(error.message);process.exitCode=2});
+  `;
+  const child = spawn(process.execPath, ["-e", program], { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  setTimeout(() => child.kill("SIGTERM"), 50);
+  const outcome = await Promise.race([
+    new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal }))),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("simulator cancellation hung")), 2_000)),
+  ]);
+  assert.deepEqual(outcome, { code: 2, signal: null });
+  assert.match(stderr, /approval simulator stopped/);
+  assert.equal(existsSync(gate), false);
+  rmSync(root, { recursive: true });
+});
+
 test("approval acceptance does not depend on Linux filesystems reporting birth time", () => {
   const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-zero-birthtime-"));
   const path = join(root, "approval.json");
@@ -184,7 +215,7 @@ test("revision lineage requires direct v1-v2-recovery ancestry and a true tree r
   assert.equal(lineage.recovery.parent, v2);
   assert.equal(lineage.recovery.tree, lineage.v1.tree);
   assert.notEqual(lineage.v2.tree, lineage.v1.tree);
-  assert.match(lineage.v1_to_v2.patch_sha256, /^[0-9a-f]{64}$/);
+  assert.match(lineage.v1_to_v2.raw_delta_sha256, /^[0-9a-f]{64}$/);
   spawnSync("git", ["-C", root, "checkout", "-q", "--orphan", "unrelated"]);
   rmSync(join(root, "version.txt"));
   mkdirSync(join(root, "branch"));
@@ -193,6 +224,49 @@ test("revision lineage requires direct v1-v2-recovery ancestry and a true tree r
   const unrelated = spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
   assert.throws(() => verifyRevisionLineage(root, { v1, v2: unrelated, revert: recovery }, []), /V2_NOT_DIRECT_SUCCESSOR/);
   rmSync(root, { recursive: true });
+});
+
+test("revision lineage ignores replacement objects, poisoned diff drivers, attributes, and caller Git config", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-poisoned-lineage-"));
+  spawnSync("git", ["init", "-q", root]);
+  spawnSync("git", ["-C", root, "config", "user.name", "Lifecycle Test"]);
+  spawnSync("git", ["-C", root, "config", "user.email", "lifecycle@example.invalid"]);
+  writeFileSync(join(root, "version.txt"), "v1\n");
+  spawnSync("git", ["-C", root, "add", "."]); spawnSync("git", ["-C", root, "commit", "-qm", "v1"]);
+  const v1 = spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  writeFileSync(join(root, "version.txt"), "v2\n");
+  spawnSync("git", ["-C", root, "add", "."]); spawnSync("git", ["-C", root, "commit", "-qm", "v2"]);
+  const v2 = spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  const originalV2Tree = spawnSync("git", ["-C", root, "show", "-s", "--format=%T", v2], { encoding: "utf8" }).stdout.trim();
+  spawnSync("git", ["-C", root, "revert", "--no-edit", v2]);
+  const recovery = spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+
+  const marker = join(root, "poison-executed");
+  const poison = join(root, "poison.sh");
+  writeFileSync(poison, `#!/bin/sh\nprintf poison > ${JSON.stringify(marker)}\n`, { mode: 0o700 });
+  chmodSync(poison, 0o700);
+  spawnSync("git", ["-C", root, "config", "diff.external", poison]);
+  spawnSync("git", ["-C", root, "config", "diff.evil.textconv", poison]);
+  mkdirSync(join(root, ".git", "info"), { recursive: true });
+  writeFileSync(join(root, ".git", "info", "attributes"), "*.txt diff=evil\n");
+  spawnSync("git", ["-C", root, "replace", v2, recovery]);
+  const poisonGlobal = join(root, "global.gitconfig");
+  writeFileSync(poisonGlobal, `[diff]\n\texternal = ${poison}\n`);
+  const previous = { external: process.env.GIT_EXTERNAL_DIFF, global: process.env.GIT_CONFIG_GLOBAL, noReplace: process.env.GIT_NO_REPLACE_OBJECTS };
+  process.env.GIT_EXTERNAL_DIFF = poison;
+  process.env.GIT_CONFIG_GLOBAL = poisonGlobal;
+  delete process.env.GIT_NO_REPLACE_OBJECTS;
+  try {
+    const lineage = verifyRevisionLineage(root, { v1, v2, revert: recovery }, []);
+    assert.equal(lineage.v2.tree, originalV2Tree);
+    assert.equal(existsSync(marker), false);
+    assert.match(lineage.v1_to_v2.raw_delta_sha256, /^[0-9a-f]{64}$/);
+  } finally {
+    if (previous.external == null) delete process.env.GIT_EXTERNAL_DIFF; else process.env.GIT_EXTERNAL_DIFF = previous.external;
+    if (previous.global == null) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = previous.global;
+    if (previous.noReplace == null) delete process.env.GIT_NO_REPLACE_OBJECTS; else process.env.GIT_NO_REPLACE_OBJECTS = previous.noReplace;
+    rmSync(root, { recursive: true });
+  }
 });
 
 test("resource sampling records the named node peak and rejects excess workload", () => {

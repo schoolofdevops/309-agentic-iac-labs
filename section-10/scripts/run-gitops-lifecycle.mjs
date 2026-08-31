@@ -211,7 +211,14 @@ function verifiedDockerDirectory() {
 
 export function commandEnvironment() {
   const docker = verifiedDockerDirectory();
-  const env = { HOME: docker.accountHome, TMPDIR: trustedTemporaryDirectory, DOCKER_HOST: resolveRancherDesktopDockerHost(), KIND_EXPERIMENTAL_PROVIDER: "docker", LANG: "C", LC_ALL: "C", PATH: `${docker.directory}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`, PAGER: "cat", GIT_PAGER: "cat", GIT_TERMINAL_PROMPT: "0" };
+  const env = {
+    HOME: docker.accountHome, TMPDIR: trustedTemporaryDirectory, DOCKER_HOST: resolveRancherDesktopDockerHost(), KIND_EXPERIMENTAL_PROVIDER: "docker",
+    LANG: "C", LC_ALL: "C", PATH: `${docker.directory}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`, PAGER: "cat",
+    GIT_ALLOW_PROTOCOL: "file", GIT_ATTR_NOSYSTEM: "1", GIT_CONFIG: "/dev/null", GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_SYSTEM: "/dev/null", GIT_EXTERNAL_DIFF: "/usr/bin/false",
+    GIT_NO_REPLACE_OBJECTS: "1", GIT_OPTIONAL_LOCKS: "0", GIT_PAGER: "cat", GIT_PROTOCOL_FROM_USER: "0",
+    GIT_SSH_COMMAND: "/usr/bin/false", GIT_TERMINAL_PROMPT: "0",
+  };
   return env;
 }
 
@@ -271,15 +278,23 @@ function jsonCommand(tool, args, options) {
   try { return JSON.parse(result.stdout); } catch (error) { fail("JSON_OUTPUT_INVALID", `${tool}: ${error.message}`); }
 }
 
-function git(root, args, records) { return execute("git", ["-C", root, "-c", "core.hooksPath=/dev/null", ...args], { records }); }
+const SAFE_GIT_CONFIG = [
+  "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=",
+  "-c", "diff.external=", "-c", "protocol.file.allow=always",
+];
+function git(root, args, records) { return execute("git", ["-C", root, ...SAFE_GIT_CONFIG, ...args], { records }); }
 
 export function verifyRevisionLineage(root, revisions, records = []) {
   for (const revision of Object.values(revisions)) {
     if (!/^[0-9a-f]{40}$/.test(revision) || git(root, ["cat-file", "-t", revision], records).stdout !== "commit") fail("REVISION_INVALID", revision);
   }
   const commit = (revision) => {
-    const [id, parents, tree] = git(root, ["show", "-s", "--format=%H%x09%P%x09%T", revision], records).stdout.split("\t");
-    return { revision: id, parents: parents ? parents.split(" ") : [], tree };
+    const raw = git(root, ["cat-file", "commit", revision], records).stdout;
+    const headers = raw.split("\n\n", 1)[0].split("\n");
+    const tree = headers.find((line) => line.startsWith("tree "))?.slice(5);
+    const parents = headers.filter((line) => line.startsWith("parent ")).map((line) => line.slice(7));
+    if (!/^[0-9a-f]{40}$/.test(tree ?? "") || parents.some((parent) => !/^[0-9a-f]{40}$/.test(parent))) fail("COMMIT_OBJECT_INVALID", revision);
+    return { revision, parents, tree };
   };
   const v1 = commit(revisions.v1);
   const v2 = commit(revisions.v2);
@@ -288,16 +303,16 @@ export function verifyRevisionLineage(root, revisions, records = []) {
   if (recovery.parents.length !== 1 || recovery.parents[0] !== v2.revision) fail("RECOVERY_NOT_DIRECT_SUCCESSOR");
   if (v1.tree === v2.tree) fail("V2_TREE_UNCHANGED");
   if (recovery.tree !== v1.tree) fail("RECOVERY_TREE_MISMATCH");
-  const patch = (from, to) => {
-    const bytes = git(root, ["diff", "--binary", from, to, "--"], records).stdout;
-    return { from, to, bytes: Buffer.byteLength(bytes), patch_sha256: sha256(bytes) };
+  const rawDelta = (from, to) => {
+    const bytes = git(root, ["diff-tree", "--raw", "--full-index", "--no-renames", "--no-commit-id", "--no-ext-diff", "--no-textconv", "-r", from, to, "--"], records).stdout;
+    return { from, to, raw_delta_bytes: Buffer.byteLength(bytes), raw_delta_sha256: sha256(bytes) };
   };
   return {
     v1: { revision: v1.revision, tree: v1.tree },
     v2: { revision: v2.revision, parent: v2.parents[0], tree: v2.tree },
     recovery: { revision: recovery.revision, parent: recovery.parents[0], tree: recovery.tree },
-    v1_to_v2: patch(v1.revision, v2.revision),
-    v2_to_recovery: patch(v2.revision, recovery.revision),
+    v1_to_v2: rawDelta(v1.revision, v2.revision),
+    v2_to_recovery: rawDelta(v2.revision, recovery.revision),
   };
 }
 
@@ -309,18 +324,29 @@ function verifyDeliveryRepository(rootInput, revisions, records) {
 
 function kindOwnershipValid(nodeInspect) {
   const node = Array.isArray(nodeInspect) && nodeInspect.length === 1 ? nodeInspect[0] : null;
-  return node?.Name === `/${EXACT.node}`
+  return /^[0-9a-f]{64}$/.test(node?.Id ?? "") && node?.Name === `/${EXACT.node}`
     && node.Config?.Image === KIND_IMAGE
     && node.Config?.Labels?.["io.x-k8s.kind.cluster"] === EXACT.cluster
     && node.Config?.Labels?.["io.x-k8s.kind.role"] === "control-plane"
     && Object.hasOwn(node.NetworkSettings?.Networks ?? {}, "kind");
 }
 
-export async function cleanupKindAfterCreateAttempt(observed, { execute: executor, observe }) {
+export async function cleanupKindAfterCreateAttempt(observed, { execute: executor, observe, reinspect }) {
   if (!observed.createAttempted) return await observe();
   const namedStatePresent = observed.clusters.includes(EXACT.cluster) || (Array.isArray(observed.nodeInspect) && observed.nodeInspect.length > 0);
   if (!namedStatePresent) return await observe();
   if (!kindOwnershipValid(observed.nodeInspect)) fail("KIND_OWNERSHIP_INVALID");
+  const initialId = observed.nodeInspect[0].Id;
+  if (initialId !== observed.expectedNodeId) fail("KIND_OWNERSHIP_REPLACED");
+  const current = await reinspect();
+  const currentPresent = current.clusters.includes(EXACT.cluster) || (Array.isArray(current.nodeInspect) && current.nodeInspect.length > 0);
+  if (!currentPresent) {
+    const absence = await observe();
+    if (absence.cluster || absence.node) fail("KIND_CLEANUP_INCOMPLETE");
+    return absence;
+  }
+  if (!kindOwnershipValid(current.nodeInspect)) fail("KIND_OWNERSHIP_INVALID");
+  if (current.nodeInspect[0].Id !== observed.expectedNodeId) fail("KIND_OWNERSHIP_REPLACED");
   await executor("kind", ["delete", "cluster", "--name", EXACT.cluster]);
   const absence = await observe();
   if (absence.cluster || absence.node) fail("KIND_CLEANUP_INCOMPLETE");
@@ -342,8 +368,13 @@ export async function invokeKindCreate({ state, create, cleanup }) {
 async function cleanupObservedKindAttempt(records, state) {
   const clusters = execute("kind", ["get", "clusters"], { records, timeout: 30_000 }).stdout.split(/\r?\n/).filter(Boolean);
   const nodeInspect = jsonCommand("docker", ["inspect", EXACT.node], { records, accepted: [0, 1], timeout: 30_000 });
-  return cleanupKindAfterCreateAttempt({ createAttempted: state.createAttempted, nodeInspect, clusters }, {
+  if (state.nodeId == null && kindOwnershipValid(nodeInspect)) state.nodeId = nodeInspect[0].Id;
+  return cleanupKindAfterCreateAttempt({ createAttempted: state.createAttempted, expectedNodeId: state.nodeId, nodeInspect, clusters }, {
     execute: (tool, args) => execute(tool, args, { records, accepted: [0], timeout: 180_000 }),
+    reinspect: () => ({
+      clusters: execute("kind", ["get", "clusters"], { records, timeout: 30_000 }).stdout.split(/\r?\n/).filter(Boolean),
+      nodeInspect: jsonCommand("docker", ["inspect", EXACT.node], { records, accepted: [0, 1], timeout: 30_000 }),
+    }),
     observe: () => {
       const final = observedPreflight(records);
       return { cluster: final.cluster, node: final.node };
@@ -587,7 +618,7 @@ export async function runGitOpsLifecycle(input) {
   const report = { schema: "agentic-iac-s10-gitops-lifecycle/v1", result: "IN_PROGRESS", started_at: new Date().toISOString(), exact_names: EXACT, frozen_versions: { kind_image: KIND_IMAGE, argo_chart: CHART_VERSION, argo_application: APP_VERSION, git_image: GIT_IMAGE }, revisions, lineage, approvals, commands: records, measurements, observations: {}, cleanup: {}, proof_limits: ["Local course approval records bind revisions but do not prove an external identity provider.", "The read-only Git daemon is anonymous local course transport, not production authentication or authorization.", "The Git revision probe runs in a hardened disposable client on the Kind network; it does not prove host bridge reachability.", "Node-container docker stats measures the named course node, not the Docker Desktop VM working set.", "The authoring-host live run used macOS sleep prevention; caffeinate is not a learner dependency.", "Raw runner command records can contain local filesystem paths; Task 6 must sanitize them before learner publication."] };
   let mirrorActive = false;
   const gateOwnerships = [];
-  const clusterState = { createAttempted: false, created: false, partialCleanupAbsence: null };
+  const clusterState = { createAttempted: false, created: false, nodeId: null, partialCleanupAbsence: null };
   try {
     execute("docker", ["build", "--label", "com.schoolofdevops.course=agentic-iac-s10", "--label", "com.schoolofdevops.release=s10-v1", "-t", WORKLOAD_IMAGES[0], join(repositoryRoot, "section-9", "app")], { records, timeout: 900_000 });
     execute("docker", ["build", "--label", "com.schoolofdevops.course=agentic-iac-s10", "--label", "com.schoolofdevops.release=s10-v2", "-t", WORKLOAD_IMAGES[1], join(repositoryRoot, "section-9", "app")], { records, timeout: 900_000 });
@@ -616,6 +647,9 @@ export async function runGitOpsLifecycle(input) {
       create: () => execute("kind", ["create", "cluster", "--name", EXACT.cluster, "--image", KIND_IMAGE, "--config", join(sectionRoot, "tools", "kind", "cluster.yaml"), "--wait", "180s"], { records, timeout: 300_000 }),
       cleanup: () => cleanupObservedKindAttempt(records, clusterState),
     });
+    const createdNode = jsonCommand("docker", ["inspect", EXACT.node], { records, timeout: 30_000 });
+    if (!kindOwnershipValid(createdNode)) fail("KIND_OWNERSHIP_INVALID");
+    clusterState.nodeId = createdNode[0].Id;
     for (const image of [...WORKLOAD_IMAGES, ...argoImages]) execute("kind", ["load", "docker-image", image, "--name", EXACT.cluster], { records, timeout: 180_000 });
     const nodeImages = jsonCommand("docker", ["exec", EXACT.node, "crictl", "images", "-o", "json"], { records, timeout: 60_000 });
     const nodeTags = new Set(nodeImages.images?.flatMap((image) => image.repoTags ?? []) ?? []);
@@ -704,7 +738,7 @@ export async function runGitOpsLifecycle(input) {
     const inspected = clusterState.createAttempted
       ? await attempt("validate-kind-ownership", () => jsonCommand("docker", ["inspect", EXACT.node], { records, accepted: [0, 1], timeout: 30_000 }))
       : [];
-    const clusterOwned = kindOwnershipValid(inspected);
+    const clusterOwned = kindOwnershipValid(inspected) && inspected[0].Id === clusterState.nodeId;
     const owner = clusterState.createAttempted
       ? await attempt("read-lifecycle-owner", () => execute("kubectl", ["--context", EXACT.context, "-n", EXACT.workloadNamespace, "get", "configmap", "agentic-iac-s10-lifecycle-owner", "-o", "json"], { records, accepted: [0, 1], timeout: 30_000 }))
       : null;
@@ -721,10 +755,15 @@ export async function runGitOpsLifecycle(input) {
     for (const ownership of gateOwnerships) await attempt("remove-approval-gate", () => removeOwnedApprovalGate(ownership));
     if (clusterState.createAttempted) await attempt("delete-kind-cluster", () => cleanupKindAfterCreateAttempt({
       createAttempted: true,
+      expectedNodeId: clusterState.nodeId,
       nodeInspect: inspected ?? [],
       clusters: clusters?.stdout?.split(/\r?\n/).filter(Boolean) ?? [],
     }, {
       execute: (tool, args) => execute(tool, args, { records, accepted: [0], timeout: 180_000 }),
+      reinspect: () => ({
+        clusters: execute("kind", ["get", "clusters"], { records, timeout: 30_000 }).stdout.split(/\r?\n/).filter(Boolean),
+        nodeInspect: jsonCommand("docker", ["inspect", EXACT.node], { records, accepted: [0, 1], timeout: 30_000 }),
+      }),
       observe: () => {
         const final = observedPreflight(records);
         return { cluster: final.cluster, node: final.node };

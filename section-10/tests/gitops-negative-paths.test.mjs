@@ -127,12 +127,14 @@ test("cleanup uses the mirror ownership root and refuses foreign or symlinked ow
 test("a failed partial Kind create cleans only a validated exact owned node and foreign state fails closed", async () => {
   const calls = [];
   const state = { createAttempted: false };
-  const ownedInspect = [{ Name: `/${EXACT.node}`, Config: { Image: "kindest/node@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5", Labels: { "io.x-k8s.kind.cluster": EXACT.cluster, "io.x-k8s.kind.role": "control-plane" } }, NetworkSettings: { Networks: { kind: {} } } }];
+  const ownedId = "a".repeat(64);
+  const ownedInspect = [{ Id: ownedId, Name: `/${EXACT.node}`, Config: { Image: "kindest/node@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5", Labels: { "io.x-k8s.kind.cluster": EXACT.cluster, "io.x-k8s.kind.role": "control-plane" } }, NetworkSettings: { Networks: { kind: {} } } }];
   await assert.rejects(() => invokeKindCreate({
     state,
     create: () => { assert.equal(state.createAttempted, true); throw new Error("KIND_CREATE_FAILED"); },
-    cleanup: () => cleanupKindAfterCreateAttempt({ createAttempted: state.createAttempted, nodeInspect: ownedInspect, clusters: [EXACT.cluster] }, {
+    cleanup: () => cleanupKindAfterCreateAttempt({ createAttempted: state.createAttempted, expectedNodeId: ownedId, nodeInspect: ownedInspect, clusters: [EXACT.cluster] }, {
       execute: async (tool, args) => { calls.push([tool, args]); return { exit: 0, stdout: "", stderr: "" }; },
+      reinspect: () => ({ clusters: [EXACT.cluster], nodeInspect: ownedInspect }),
       observe: () => ({ cluster: false, node: false }),
     }),
   }), /KIND_CREATE_FAILED/);
@@ -141,7 +143,15 @@ test("a failed partial Kind create cleans only a validated exact owned node and 
 
   const foreign = structuredClone(ownedInspect);
   foreign[0].Config.Labels["io.x-k8s.kind.cluster"] = "foreign";
-  await assert.rejects(() => cleanupKindAfterCreateAttempt({ createAttempted: true, nodeInspect: foreign, clusters: [EXACT.cluster] }, {
-    execute: async () => { throw new Error("must not delete"); }, observe: () => ({ cluster: true, node: true }),
+  await assert.rejects(() => cleanupKindAfterCreateAttempt({ createAttempted: true, expectedNodeId: ownedId, nodeInspect: foreign, clusters: [EXACT.cluster] }, {
+    execute: async () => { throw new Error("must not delete"); }, reinspect: () => ({ clusters: [EXACT.cluster], nodeInspect: foreign }), observe: () => ({ cluster: true, node: true }),
   }), /KIND_OWNERSHIP_INVALID/);
+
+  const replacement = structuredClone(ownedInspect);
+  replacement[0].Id = "b".repeat(64);
+  let deleted = false;
+  await assert.rejects(() => cleanupKindAfterCreateAttempt({ createAttempted: true, expectedNodeId: ownedId, nodeInspect: ownedInspect, clusters: [EXACT.cluster] }, {
+    execute: async () => { deleted = true; }, reinspect: () => ({ clusters: [EXACT.cluster], nodeInspect: replacement }), observe: () => ({ cluster: true, node: true }),
+  }), /KIND_OWNERSHIP_REPLACED/);
+  assert.equal(deleted, false);
 });
