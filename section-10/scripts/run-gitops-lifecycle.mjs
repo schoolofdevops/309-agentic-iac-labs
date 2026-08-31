@@ -2,7 +2,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -525,7 +525,7 @@ function stopMirror(mirrorRoot, records) {
   return stopGitMirror({ rootInput: mirrorRoot, runtime: task4Runtime(records) });
 }
 
-function openApprovalGate(path, revision, purpose, observed) {
+export function openApprovalGate(path, revision, purpose, observed) {
   const gatePath = `${path}.gate.json`;
   if (existsSync(gatePath)) fail("PREEXISTING_APPROVAL_GATE", purpose);
   const openedAtMs = Date.now();
@@ -537,7 +537,36 @@ function openApprovalGate(path, revision, purpose, observed) {
     observed,
   };
   writeFileSync(gatePath, `${JSON.stringify(gate)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-  return { openedAtMs, opened_at: gate.opened_at };
+  const metadata = lstatSync(gatePath);
+  const raw = readFileSync(gatePath, "utf8");
+  return {
+    openedAtMs,
+    opened_at: gate.opened_at,
+    ownership: {
+      path: gatePath,
+      device: String(metadata.dev),
+      inode: String(metadata.ino),
+      bytes: metadata.size,
+      ctime_ms: metadata.ctimeMs,
+      mtime_ms: metadata.mtimeMs,
+      identity_sha256: sha256(raw),
+    },
+  };
+}
+
+export function removeOwnedApprovalGate(ownership) {
+  if (!existsSync(ownership.path)) return false;
+  const before = lstatSync(ownership.path);
+  if (!before.isFile() || before.isSymbolicLink()
+    || String(before.dev) !== ownership.device || String(before.ino) !== ownership.inode
+    || before.size !== ownership.bytes || before.ctimeMs !== ownership.ctime_ms || before.mtimeMs !== ownership.mtime_ms
+    || sha256(readFileSync(ownership.path, "utf8")) !== ownership.identity_sha256) fail("APPROVAL_GATE_OWNERSHIP_CHANGED");
+  const after = lstatSync(ownership.path);
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+    || before.ctimeMs !== after.ctimeMs || before.mtimeMs !== after.mtimeMs) fail("APPROVAL_GATE_OWNERSHIP_CHANGED");
+  unlinkSync(ownership.path);
+  if (existsSync(ownership.path)) fail("APPROVAL_GATE_CLEANUP_INCOMPLETE");
+  return true;
 }
 
 export async function runGitOpsLifecycle(input) {
@@ -547,7 +576,7 @@ export async function runGitOpsLifecycle(input) {
   const revisions = { v1: input.v1Revision, v2: input.v2Revision, revert: input.revertRevision };
   const deliveryRoot = verifyDeliveryRepository(input.deliveryRoot, Object.values(revisions), records);
   const mirrorRoot = canonicalMirrorRoot(input.mirrorRoot);
-  assertLaterApprovalsAbsent([input.approvalV2, input.approvalRevert]);
+  assertLaterApprovalsAbsent([input.approvalV2, input.approvalRevert, `${input.approvalV2}.gate.json`, `${input.approvalRevert}.gate.json`]);
   const approvals = {
     v1: { gate: "launch", ...assertApprovedRevision(input.approvalV1, revisions.v1, "promote-v1") },
   };
@@ -557,6 +586,7 @@ export async function runGitOpsLifecycle(input) {
   const sampler = startSampler();
   const report = { schema: "agentic-iac-s10-gitops-lifecycle/v1", result: "IN_PROGRESS", started_at: new Date().toISOString(), exact_names: EXACT, frozen_versions: { kind_image: KIND_IMAGE, argo_chart: CHART_VERSION, argo_application: APP_VERSION, git_image: GIT_IMAGE }, revisions, lineage, approvals, commands: records, measurements, observations: {}, cleanup: {}, proof_limits: ["Local course approval records bind revisions but do not prove an external identity provider.", "The read-only Git daemon is anonymous local course transport, not production authentication or authorization.", "The Git revision probe runs in a hardened disposable client on the Kind network; it does not prove host bridge reachability.", "Node-container docker stats measures the named course node, not the Docker Desktop VM working set.", "The authoring-host live run used macOS sleep prevention; caffeinate is not a learner dependency.", "Raw runner command records can contain local filesystem paths; Task 6 must sanitize them before learner publication."] };
   let mirrorActive = false;
+  const gateOwnerships = [];
   const clusterState = { createAttempted: false, created: false, partialCleanupAbsence: null };
   try {
     execute("docker", ["build", "--label", "com.schoolofdevops.course=agentic-iac-s10", "--label", "com.schoolofdevops.release=s10-v1", "-t", WORKLOAD_IMAGES[0], join(repositoryRoot, "section-9", "app")], { records, timeout: 900_000 });
@@ -624,6 +654,7 @@ export async function runGitOpsLifecycle(input) {
       operation: report.observations.v1_application.operationState?.phase,
       revision: report.observations.v1_application.sync?.revision,
     });
+    gateOwnerships.push(v2Gate.ownership);
     approvals.v2 = { gate: v2Gate.opened_at, ...(await waitForApprovedRevision(input.approvalV2, revisions.v2, "promote-v2", { gateMs: v2Gate.openedAtMs })) };
 
     stopMirror(mirrorRoot, records); mirrorActive = false;
@@ -648,6 +679,7 @@ export async function runGitOpsLifecycle(input) {
       sync: report.observations.drift.sync?.status,
       replicas_after_15_seconds: drifted.replicas,
     });
+    gateOwnerships.push(revertGate.ownership);
     approvals.revert = { gate: revertGate.opened_at, ...(await waitForApprovedRevision(input.approvalRevert, revisions.revert, "revert-and-recover", { gateMs: revertGate.openedAtMs })) };
 
     stopMirror(mirrorRoot, records); mirrorActive = false;
@@ -686,6 +718,7 @@ export async function runGitOpsLifecycle(input) {
       report.cleanup.kubernetes_absence_before_cluster_delete = await attempt("wait-kubernetes-absence", () => waitCleanupAbsence(records));
     }
     if (existsSync(mirrorRoot)) await attempt("stop-git-mirror", () => stopMirror(mirrorRoot, records));
+    for (const ownership of gateOwnerships) await attempt("remove-approval-gate", () => removeOwnedApprovalGate(ownership));
     if (clusterState.createAttempted) await attempt("delete-kind-cluster", () => cleanupKindAfterCreateAttempt({
       createAttempted: true,
       nodeInspect: inspected ?? [],
@@ -699,8 +732,14 @@ export async function runGitOpsLifecycle(input) {
     }));
     await delay(2_500);
     report.cleanup.absence = await attempt("prove-final-absence", () => observedPreflight(records)) ?? { cluster: true };
+    report.cleanup.approval_gates_absent = {
+      v2: !existsSync(`${input.approvalV2}.gate.json`),
+      recovery: !existsSync(`${input.approvalRevert}.gate.json`),
+    };
     report.cleanup.errors = cleanupErrors;
-    report.cleanup.status = Object.values(report.cleanup.absence).every((value) => value === false) && !existsSync(mirrorRoot) ? "PASS" : "FAIL";
+    report.cleanup.status = Object.values(report.cleanup.absence).every((value) => value === false)
+      && Object.values(report.cleanup.approval_gates_absent).every(Boolean)
+      && !existsSync(mirrorRoot) && cleanupErrors.length === 0 ? "PASS" : "FAIL";
     await stopSampler(sampler, measurements);
     report.completed_at = new Date().toISOString(); report.elapsed_ms = Date.now() - started;
     report.measurements.peak_gib = Number((measurements.peak_bytes / 1024 ** 3).toFixed(3));

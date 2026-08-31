@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -19,7 +19,9 @@ import {
   requiredArgoImages,
   transportTagFor,
   normalizeNodeImageReference,
+  openApprovalGate,
   recordPeak,
+  removeOwnedApprovalGate,
   verifyRevisionLineage,
   waitForApprovedRevision,
   workloadRolloutTargets,
@@ -143,6 +145,24 @@ test("an accepted approval must remain byte-identical until the explicit sync", 
   assert.doesNotThrow(() => assertApprovalUnchanged(path, value.revision, value.purpose, accepted));
   writeFileSync(path, `${JSON.stringify({ ...value, approved: false })}\n`, { mode: 0o600 });
   assert.throws(() => assertApprovalUnchanged(path, value.revision, value.purpose, accepted), /APPROVAL_CHANGED_AFTER_ACCEPTANCE|APPROVAL_RECORD_INVALID/);
+  rmSync(root, { recursive: true });
+});
+
+test("final cleanup removes only unchanged runner-owned approval gates", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-gate-cleanup-"));
+  const v2Approval = join(root, "v2.json");
+  const v2Gate = openApprovalGate(v2Approval, "7".repeat(40), "promote-v2", { sync: "Synced", health: "Healthy", operation: "Succeeded" });
+  const v2GatePath = `${v2Approval}.gate.json`;
+  assert.equal(existsSync(v2GatePath), true);
+  removeOwnedApprovalGate(v2Gate.ownership);
+  assert.equal(existsSync(v2GatePath), false);
+
+  const recoveryApproval = join(root, "revert.json");
+  const recoveryGate = openApprovalGate(recoveryApproval, "8".repeat(40), "revert-and-recover", { sync: "OutOfSync", replicas_after_15_seconds: 2 });
+  const recoveryGatePath = `${recoveryApproval}.gate.json`;
+  writeFileSync(recoveryGatePath, "foreign replacement\n", { mode: 0o600 });
+  assert.throws(() => removeOwnedApprovalGate(recoveryGate.ownership), /APPROVAL_GATE_OWNERSHIP_CHANGED/);
+  assert.equal(existsSync(recoveryGatePath), true);
   rmSync(root, { recursive: true });
 });
 
