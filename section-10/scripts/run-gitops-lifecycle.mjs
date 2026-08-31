@@ -38,8 +38,8 @@ function approvalGateParent(path, { lstat = lstatSync } = {}) {
   for (let current = parent; current !== dirname(current); current = dirname(current)) ancestors.unshift(current);
   for (const ancestor of ancestors) {
     const metadata = lstat(ancestor);
-    const macosTemporaryAlias = ancestor === "/var" && realpathSync(ancestor) === "/private/var";
-    if (metadata.isSymbolicLink() && !macosTemporaryAlias) fail("APPROVAL_GATE_ANCESTOR_CHANGED");
+    const macosSystemAlias = ({ "/tmp": "/private/tmp", "/var": "/private/var" })[ancestor];
+    if (metadata.isSymbolicLink() && (!macosSystemAlias || realpathSync(ancestor) !== macosSystemAlias)) fail("APPROVAL_GATE_ANCESTOR_CHANGED");
   }
   const metadata = lstat(parent);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail("APPROVAL_GATE_PARENT_INVALID");

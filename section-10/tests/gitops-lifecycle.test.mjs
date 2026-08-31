@@ -483,6 +483,15 @@ test("runner rejects parent or ancestor replacement before an approval can advan
   }
 });
 
+test("runner accepts the macOS temporary-directory aliases while rejecting learner symlinks", () => {
+  const root = mkdtempSync("/tmp/agentic-iac-s10-system-alias-");
+  try {
+    assert.doesNotThrow(() => openApprovalGate(join(root, "v2.json"), "d".repeat(40), "promote-v2", { sync: "Synced", health: "Healthy", operation: "Succeeded", revision: "c".repeat(40) }));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("pre-sync gate substitution prevents every sync command", () => {
   const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-presync-binding-"));
   try {
