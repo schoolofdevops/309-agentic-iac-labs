@@ -120,6 +120,33 @@ function setupActionEngine() {
   return { root, executable, marker, sha256: sha256(executable) };
 }
 
+function setupPlanJsonEngine(planJson) {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-engine-"));
+  const executable = join(root, "terraform");
+  const installed = realpathSync("/opt/homebrew/bin/terraform");
+  const serialized = JSON.stringify(planJson);
+  writeFileSync(executable, `#!/bin/sh
+if [ "$1" = "show" ] && [ "$2" = "-json" ]; then
+  printf '%s\\n' '${serialized}'
+  exit 0
+fi
+exec "${installed}" "$@"
+`);
+  chmodSync(executable, 0o500);
+  return { root, executable, sha256: sha256(executable) };
+}
+
+function reviewedResourceChange(overrides = {}) {
+  return {
+    address: "terraform_data.reviewed_delivery",
+    mode: "managed",
+    type: "terraform_data",
+    name: "reviewed_delivery",
+    change: { actions: ["create"] },
+    ...overrides,
+  };
+}
+
 function expectRejected(result, code) {
   assert.notEqual(result.status, 0, result.stdout);
   assert.match(result.stderr, new RegExp(code));
@@ -379,6 +406,64 @@ test("rejects a setup-action engine whose bytes changed after hashing", () => {
   assert.match(result.stderr, /ENGINE_HASH_MISMATCH/);
 });
 
+const rejectedPlanActionEvidence = [
+  [
+    "missing resource_changes instead of treating the plan gate as an unconditional PASS",
+    {},
+    "PLAN_RESOURCE_CHANGES_MISSING",
+  ],
+  [
+    "a duplicate reviewed resource address",
+    { resource_changes: [reviewedResourceChange(), reviewedResourceChange()] },
+    "PLAN_RESOURCE_ADDRESS_DUPLICATE",
+  ],
+  [
+    "an unexpected resource address",
+    { resource_changes: [reviewedResourceChange({ address: "terraform_data.unreviewed_delivery", name: "unreviewed_delivery" })] },
+    "PLAN_RESOURCE_ADDRESS_UNEXPECTED",
+  ],
+  [
+    "an empty action array",
+    { resource_changes: [reviewedResourceChange({ change: { actions: [] } })] },
+    "PLAN_ACTIONS_EMPTY",
+  ],
+  [
+    "an unknown action token",
+    { resource_changes: [reviewedResourceChange({ change: { actions: ["execute"] } })] },
+    "PLAN_ACTION_TOKEN_UNKNOWN",
+  ],
+  [
+    "an address whose resource identity fields disagree",
+    { resource_changes: [reviewedResourceChange({ type: "null_resource" })] },
+    "PLAN_RESOURCE_IDENTITY_INCONSISTENT",
+  ],
+  [
+    "a known action outside the reviewed plan-only create contract",
+    { resource_changes: [reviewedResourceChange({ change: { actions: ["update"] } })] },
+    "PLAN_ACTIONS_FORBIDDEN",
+  ],
+  [
+    "a replacement action array outside the reviewed plan-only create contract",
+    { resource_changes: [reviewedResourceChange({ change: { actions: ["delete", "create"] } })] },
+    "PLAN_ACTIONS_FORBIDDEN",
+  ],
+];
+
+for (const [label, planJson, code] of rejectedPlanActionEvidence) {
+  test(`rejects direct plan JSON with ${label}`, { timeout: 120_000 }, () => {
+    const source = makeSource();
+    const engine = setupPlanJsonEngine(planJson);
+    const result = run(source, { enginePath: engine.executable, engineSha256: engine.sha256 });
+    try {
+      expectRejected(result, code);
+    } finally {
+      if (existsSync(result.output)) rmSync(result.output, { recursive: true, force: true });
+      rmSync(engine.root, { recursive: true, force: true });
+      rmSync(source, { recursive: true, force: true });
+    }
+  });
+}
+
 test("rejects a symlink substituted for the setup-action engine", () => {
   const source = makeSource();
   const engineRoot = mkdtempSync(join(tmpdir(), "agentic-iac-s10-engine-"));
@@ -528,7 +613,7 @@ for (const engine of ["terraform", "opentofu"]) {
     const report = JSON.parse(readFileSync(reportPath, "utf8"));
     assert.deepEqual(Object.keys(report).sort(), [
       "apply_permitted", "engine", "engine_version", "gate_results", "plan_json_sha256",
-      "plan_sha256", "resource_addresses", "source_revision", "task_id", "workflow_sha256",
+      "plan_sha256", "resource_actions", "resource_addresses", "source_revision", "task_id", "workflow_sha256",
     ]);
     assert.equal(report.task_id, taskId);
     assert.equal(report.source_revision, manifest.source_revision);
@@ -538,6 +623,9 @@ for (const engine of ["terraform", "opentofu"]) {
     assert.match(report.plan_sha256, /^[0-9a-f]{64}$/);
     assert.match(report.plan_json_sha256, /^[0-9a-f]{64}$/);
     assert.deepEqual(report.resource_addresses, ["terraform_data.reviewed_delivery"]);
+    assert.deepEqual(report.resource_actions, [
+      { address: "terraform_data.reviewed_delivery", actions: ["create"] },
+    ]);
     assert.equal(report.apply_permitted, false);
     assert.deepEqual(report.gate_results, {
       format: "PASS",

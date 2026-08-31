@@ -24,6 +24,10 @@ const RUNNER_RELATIVE_PATH = "section-10/scripts/run-reviewed-plan.mjs";
 const SAFE_WORKFLOW_SHA256 = "337c1561ebebff73c35180216bdccae24e27d7ab530f269a3c55d05141a66bd2";
 const SAFE_TEST_SHA256 = "45cb820aec176450d9f09fac29f34316e9cd85f3f006ce453c58a8b0f0df8a3a";
 const SAFE_MAIN_SHA256 = "1be8f6407f2726f5b346ed9a761ce69700fb1884f2fdb48d52789f694148fd46";
+const EXPECTED_RESOURCE_ACTIONS = new Map([
+  ["terraform_data.reviewed_delivery", ["create"]],
+]);
+const KNOWN_ACTION_TOKENS = new Set(["no-op", "create", "read", "update", "delete", "forget"]);
 const GIT = "/usr/bin/git";
 const ENGINE = {
   terraform: {
@@ -232,6 +236,40 @@ function validateTerraformFiles(files) {
   }
 }
 
+function validatedResourceActions(planJson) {
+  if (!Array.isArray(planJson?.resource_changes) || planJson.resource_changes.length === 0) {
+    reject("PLAN_RESOURCE_CHANGES_MISSING", "direct plan JSON must contain resource_changes");
+  }
+  const seen = new Set();
+  const resourceActions = [];
+  for (const resourceChange of planJson.resource_changes) {
+    const address = resourceChange?.address;
+    if (seen.has(address)) reject("PLAN_RESOURCE_ADDRESS_DUPLICATE", String(address));
+    seen.add(address);
+    const expectedActions = EXPECTED_RESOURCE_ACTIONS.get(address);
+    if (!expectedActions) reject("PLAN_RESOURCE_ADDRESS_UNEXPECTED", String(address));
+    if (resourceChange.mode !== "managed" || resourceChange.type !== "terraform_data" || resourceChange.name !== "reviewed_delivery") {
+      reject("PLAN_RESOURCE_IDENTITY_INCONSISTENT", address);
+    }
+    const actions = resourceChange.change?.actions;
+    if (!Array.isArray(actions)) reject("PLAN_ACTIONS_INVALID", address);
+    if (actions.length === 0) reject("PLAN_ACTIONS_EMPTY", address);
+    for (const action of actions) {
+      if (typeof action !== "string" || !KNOWN_ACTION_TOKENS.has(action)) {
+        reject("PLAN_ACTION_TOKEN_UNKNOWN", String(action));
+      }
+    }
+    if (JSON.stringify(actions) !== JSON.stringify(expectedActions)) {
+      reject("PLAN_ACTIONS_FORBIDDEN", `${address}: ${JSON.stringify(actions)}`);
+    }
+    resourceActions.push({ address, actions: [...actions] });
+  }
+  if (seen.size !== EXPECTED_RESOURCE_ACTIONS.size) {
+    reject("PLAN_RESOURCE_ADDRESS_MISSING", "direct plan JSON omitted an intended resource address");
+  }
+  return resourceActions.sort((left, right) => left.address.localeCompare(right.address));
+}
+
 function trustedEngine(profile, explicitPath, expectedSha256) {
   if (explicitPath || expectedSha256) {
     if (!explicitPath || !/^[0-9a-f]{64}$/.test(expectedSha256 ?? "") || !isAbsolute(explicitPath)) {
@@ -374,8 +412,8 @@ function main() {
     const planJsonBytes = command(executable, ["show", "-json", planPath], materialized.workingDirectory, env).stdout;
     writeFileSync(planJsonPath, planJsonBytes, { mode: 0o600 });
     const planJson = JSON.parse(planJsonBytes);
-    const resourceAddresses = [...new Set((planJson.resource_changes ?? []).map((change) => change.address))].sort();
-    if (resourceAddresses.length === 0) reject("EMPTY_PLAN", "accepted evidence must name reviewed resources");
+    const resourceActions = validatedResourceActions(planJson);
+    const resourceAddresses = resourceActions.map(({ address }) => address);
 
     const report = {
       task_id: TASK_ID,
@@ -386,6 +424,7 @@ function main() {
       plan_sha256: hashFile(planPath),
       plan_json_sha256: hashFile(planJsonPath),
       resource_addresses: resourceAddresses,
+      resource_actions: resourceActions,
       gate_results: {
         format: "PASS",
         init_backend_disabled: "PASS",
