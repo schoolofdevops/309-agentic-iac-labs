@@ -4,7 +4,14 @@ import { createHash, randomBytes } from "node:crypto";
 import { closeSync, constants as fsConstants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, parse, resolve } from "node:path";
 
-import { HUMAN_APPROVAL_IDENTITIES, HUMAN_APPROVAL_SCHEMA, assertApprovalGateBinding, assertApprovedRevision, readApprovalGateBinding } from "./run-gitops-lifecycle.mjs";
+import {
+  HUMAN_APPROVAL_IDENTITIES,
+  HUMAN_APPROVAL_SCHEMA,
+  assertApprovalGateHandoff,
+  assertApprovedRevision,
+  readApprovalGateHandoff,
+  removeOwnedApprovalGateHandoff,
+} from "./run-gitops-lifecycle.mjs";
 
 const GATE_SCHEMA = "agentic-iac-s10-approval-gate/v1";
 const GATE_SUFFIX = ".gate.json";
@@ -61,27 +68,27 @@ function readNoFollowApprovalOutput(path) {
   }
 }
 
-export function readApprovalGate(path, { lstat = lstatSync, readFile = readFileSync } = {}) {
-  let declared;
-  try { declared = lstat(path); } catch { fail("APPROVAL_GATE_INVALID"); }
-  if (!declared.isFile() || declared.isSymbolicLink() || (declared.mode & 0o077) !== 0) fail("APPROVAL_GATE_INVALID");
-  if (typeof process.getuid === "function" && declared.uid !== process.getuid()) fail("APPROVAL_GATE_OWNER_INVALID");
-  let binding;
-  try { binding = readApprovalGateBinding(path, { lstat, read: readFile }); } catch (error) {
+export function readApprovalGate(path, { fstat = fstatSync, lstat = lstatSync, readFile = readFileSync } = {}) {
+  let handoff;
+  try { handoff = readApprovalGateHandoff(path, { fstat, lstat, read: readFile }); } catch (error) {
     if (error?.message === "APPROVAL_GATE_ANCESTOR_CHANGED") fail("SYMLINK_PATH_FORBIDDEN");
-    throw error;
+    if (/^APPROVAL_GATE_(?:HANDOFF_)?(?:BINDING_)?CHANGED/.test(error?.message ?? "")) fail("APPROVAL_GATE_CHANGED");
+    fail("APPROVAL_GATE_INVALID");
   }
+  const binding = handoff.binding;
+  if (binding.file.mode !== 0o600) fail("APPROVAL_GATE_INVALID");
+  if (typeof process.getuid === "function" && binding.file.owner !== String(process.getuid())) fail("APPROVAL_GATE_OWNER_INVALID");
   const value = binding.gate;
   if (!sameKeys(value, GATE_KEYS) || value.schema !== GATE_SCHEMA || !isRevision(value.revision)
     || typeof value.purpose !== "string" || typeof value.opened_at !== "string"
     || !Number.isFinite(Date.parse(value.opened_at)) || !Object.hasOwn(FROZEN_PURPOSES, value.purpose)
     || !FROZEN_PURPOSES[value.purpose](value.observed)
     || (value.purpose === "promote-v2" && value.observed.revision === value.revision)) fail("APPROVAL_GATE_INVALID");
-  return { path: binding.path, metadata: binding.file, value, binding };
+  return { path: binding.path, metadata: binding.file, value, binding, handoff };
 }
 
 function assertGateUnchanged(accepted) {
-  try { assertApprovalGateBinding(accepted.binding); } catch { fail("APPROVAL_GATE_CHANGED"); }
+  try { assertApprovalGateHandoff(accepted.handoff); } catch { fail("APPROVAL_GATE_CHANGED"); }
 }
 
 function parseArgs(argv) {
@@ -163,6 +170,8 @@ export function createApprovalFromGate({ gate, output, revision, purpose }, { af
     if (!sameOutputIdentity(created, readNoFollowApprovalOutput(requestedOutput))) fail("APPROVAL_OUTPUT_CHANGED");
     assertApprovedRevision(requestedOutput, revision, purpose);
     if (!sameOutputIdentity(created, readNoFollowApprovalOutput(requestedOutput))) fail("APPROVAL_OUTPUT_CHANGED");
+    assertGateUnchanged(accepted);
+    removeOwnedApprovalGateHandoff(accepted.handoff.ownership);
     return { revision, purpose };
   } catch (error) {
     if (created) removeOnlyCreatedOutput(requestedOutput, created);

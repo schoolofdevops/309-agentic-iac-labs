@@ -8,7 +8,16 @@ import { dirname, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
-import { EXACT, openApprovalGate, removeOwnedApprovalGate } from "./run-gitops-lifecycle.mjs";
+import {
+  APPROVAL_GATE_HANDOFF_SUFFIX,
+  EXACT,
+  assertApprovalGateBinding,
+  assertApprovalGateHandoff,
+  openApprovalGate,
+  removeOwnedApprovalGate,
+  removeOwnedApprovalGateHandoff,
+  writeApprovalGateHandoff,
+} from "./run-gitops-lifecycle.mjs";
 import { DAEMON_COMMAND, IMAGE as GIT_IMAGE, productionRuntime } from "./start-git-mirror.mjs";
 
 const PROMOTION_PATH = "section-10/starter/gitops/chart/values.yaml";
@@ -79,6 +88,12 @@ networkPolicy:
   enforcementNote: Rendered policy is not proof of enforcement; use a policy-capable CNI.
 `;
 const FROZEN_V2_VALUES = FROZEN_V1_VALUES.replace("  tag: s10-v1\n", "  tag: s10-v2\n");
+function gitBlobId(bytes) {
+  const body = Buffer.from(bytes, "utf8");
+  return createHash("sha1").update(`blob ${body.length}\0`).update(body).digest("hex");
+}
+const FROZEN_V1_BLOB = gitBlobId(FROZEN_V1_VALUES);
+const FROZEN_V2_BLOB = gitBlobId(FROZEN_V2_VALUES);
 const SAFE_GIT_CONFIG = [
   "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=",
   "-c", "diff.external=", "-c", "protocol.file.allow=always",
@@ -219,7 +234,9 @@ function isSystemTemporaryRoot(path) {
 
 export function bindApprovalBoundary({ source: sourceInput, approval: approvalInput, purpose }) {
   if (!PURPOSES.has(purpose)) fail("INPUT_INVALID");
-  const source = realpathSync(resolve(sourceInput));
+  const lexicalSource = resolve(sourceInput);
+  rejectSymlinkAncestors(lexicalSource);
+  const source = realpathSync(lexicalSource);
   const sourceIdentity = identity(source, "directory");
   const approval = resolve(approvalInput);
   const expectedName = purpose === "promote-v2" ? "v2.json" : "recovery.json";
@@ -238,11 +255,11 @@ export function bindApprovalBoundary({ source: sourceInput, approval: approvalIn
   try { marker = identity(markerPath, "file"); } catch { fail("APPROVAL_MARKER_INVALID"); }
   if (marker.mode !== 0o400 || marker.owner !== approvalRoot.owner || marker.size !== Buffer.byteLength(APPROVAL_MARKER_BYTES)
     || readFileSync(marker.canonical, "utf8") !== APPROVAL_MARKER_BYTES) fail("APPROVAL_MARKER_INVALID");
-  if (existsSync(approval) || existsSync(`${approval}.gate.json`)) fail("PREEXISTING_APPROVAL_STATE");
+  if (existsSync(approval) || existsSync(`${approval}.gate.json`) || existsSync(`${approval}.gate.json${APPROVAL_GATE_HANDOFF_SUFFIX}`)) fail("PREEXISTING_APPROVAL_STATE");
   return { approval, approvalRoot, marker, source, sourceIdentity, temporaryRoot };
 }
 
-export function assertApprovalBoundaryUnchanged(binding, { gateExpected }) {
+export function assertApprovalBoundaryUnchanged(binding, { gateExpected, gateBinding }) {
   let currentRoot;
   let currentApprovalRoot;
   let currentMarker;
@@ -259,9 +276,9 @@ export function assertApprovalBoundaryUnchanged(binding, { gateExpected }) {
   if (!sameIdentity(binding.sourceIdentity, currentSource)) fail("SOURCE_BOUNDARY_CHANGED");
   const gatePath = `${binding.approval}.gate.json`;
   if (gateExpected) {
-    if (!existsSync(gatePath)) fail("APPROVAL_BOUNDARY_CHANGED");
-    const gate = identity(gatePath, "file");
-    if (gate.mode !== 0o600 || gate.owner !== binding.approvalRoot.owner) fail("APPROVAL_BOUNDARY_CHANGED");
+    if (!gateBinding || gateBinding.path !== gatePath) fail("APPROVAL_BOUNDARY_CHANGED");
+    try { assertApprovalGateBinding(gateBinding); } catch { fail("APPROVAL_BOUNDARY_CHANGED"); }
+    if (gateBinding.file.mode !== 0o600 || gateBinding.file.owner !== binding.approvalRoot.owner) fail("APPROVAL_BOUNDARY_CHANGED");
   } else if (existsSync(gatePath)) fail("APPROVAL_BOUNDARY_CHANGED");
 }
 
@@ -527,9 +544,9 @@ function assertPromotionCommit(source, candidate, currentRevision, gitRun) {
   const paths = gitRun(source, ["diff", "--name-only", "--no-renames", "--no-ext-diff", "--no-textconv", `${currentRevision}..${candidate.revision}`, "--"])
     .split("\n").filter(Boolean);
   if (JSON.stringify(paths) !== JSON.stringify([PROMOTION_PATH])) fail("PROMOTION_SCOPE_INVALID", paths.join(","));
-  const before = gitRun(source, ["show", `${currentRevision}:${PROMOTION_PATH}`]);
-  const after = gitRun(source, ["show", `${candidate.revision}:${PROMOTION_PATH}`]);
-  if (`${before}\n` !== FROZEN_V1_VALUES || `${after}\n` !== FROZEN_V2_VALUES) fail("PROMOTION_VALUES_INVALID");
+  const before = gitRun(source, ["rev-parse", `${currentRevision}:${PROMOTION_PATH}`]);
+  const after = gitRun(source, ["rev-parse", `${candidate.revision}:${PROMOTION_PATH}`]);
+  if (before !== FROZEN_V1_BLOB || after !== FROZEN_V2_BLOB) fail("PROMOTION_VALUES_INVALID");
 }
 
 function assertRecoveryCommit(source, recovery, currentRevision, gitRun) {
@@ -541,9 +558,9 @@ function assertRecoveryCommit(source, recovery, currentRevision, gitRun) {
   const paths = gitRun(source, ["diff", "--name-only", "--no-renames", "--no-ext-diff", "--no-textconv", `${currentRevision}..${recovery.revision}`, "--"])
     .split("\n").filter(Boolean);
   if (JSON.stringify(paths) !== JSON.stringify([PROMOTION_PATH])) fail("RECOVERY_SCOPE_INVALID", paths.join(","));
-  const before = gitRun(source, ["show", `${currentRevision}:${PROMOTION_PATH}`]);
-  const after = gitRun(source, ["show", `${recovery.revision}:${PROMOTION_PATH}`]);
-  if (`${before}\n` !== FROZEN_V2_VALUES || `${after}\n` !== FROZEN_V1_VALUES) fail("RECOVERY_VALUES_INVALID");
+  const before = gitRun(source, ["rev-parse", `${currentRevision}:${PROMOTION_PATH}`]);
+  const after = gitRun(source, ["rev-parse", `${recovery.revision}:${PROMOTION_PATH}`]);
+  if (before !== FROZEN_V2_BLOB || after !== FROZEN_V1_BLOB) fail("RECOVERY_VALUES_INVALID");
 }
 
 function assertStableValidatedRuntime(first, next, purpose, currentRevision) {
@@ -580,14 +597,23 @@ async function createLearnerApprovalGate(input) {
   assertApprovalBoundaryUnchanged(boundary, { gateExpected: false });
 
   const gate = openApprovalGate(boundary.approval, input.revision, input.purpose, observed);
+  let handoff;
   try {
-    assertApprovalBoundaryUnchanged(boundary, { gateExpected: true });
+    handoff = writeApprovalGateHandoff(gate.binding);
+    assertApprovalBoundaryUnchanged(boundary, { gateExpected: true, gateBinding: gate.binding });
+    assertApprovalGateHandoff(handoff);
     assertProductionEnvironmentUnchanged(environment);
     inspectGitCandidate({ source: boundary.source, revision: input.revision, currentRevision, purpose: input.purpose }, { gitRun: environment.gitRun });
     assertStableValidatedRuntime(initial, collectRuntimeSnapshot(environment, input.purpose), input.purpose, currentRevision);
-    assertApprovalBoundaryUnchanged(boundary, { gateExpected: true });
+    assertApprovalBoundaryUnchanged(boundary, { gateExpected: true, gateBinding: gate.binding });
+    assertApprovalGateHandoff(handoff);
   } catch (error) {
-    try { removeOwnedApprovalGate(gate.ownership); } catch (cleanupError) { fail("GATE_POSTCHECK_AND_CLEANUP_FAILED", `${error.message}; ${cleanupError.message}`); }
+    let cleanupFailure;
+    if (handoff) {
+      try { removeOwnedApprovalGateHandoff(handoff.ownership); } catch (cleanupError) { cleanupFailure = cleanupError; }
+    }
+    try { removeOwnedApprovalGate(gate.ownership); } catch (cleanupError) { cleanupFailure ??= cleanupError; }
+    if (cleanupFailure) fail("GATE_POSTCHECK_AND_CLEANUP_FAILED", `${error.message}; ${cleanupFailure.message}`);
     throw error;
   }
   return { approval: boundary.approval, gate: gate.binding.path, observed, purpose: input.purpose, revision: input.revision };

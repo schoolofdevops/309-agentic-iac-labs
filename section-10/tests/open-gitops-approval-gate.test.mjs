@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +24,12 @@ const GIT = "/usr/bin/git";
 const VALUES = "section-10/starter/gitops/chart/values.yaml";
 const NODE_IMAGE = "kindest/node@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5";
 const openerSource = join(dirname(fileURLToPath(import.meta.url)), "../scripts/open-gitops-approval-gate.mjs");
+
+function runOpener({ source, approval, revision, purpose }) {
+  return spawnSync(process.execPath, [openerSource,
+    "--source", source, "--revision", revision, "--approval", approval, "--purpose", purpose,
+  ], { encoding: "utf8" });
+}
 
 function git(root, args, env = process.env) {
   const result = spawnSync(GIT, ["-C", root, ...args], { encoding: "utf8", env });
@@ -181,6 +187,9 @@ test("production module exposes no injectable gate-publishing function", () => {
   assert.doesNotMatch(source, /(?:create|open)LearnerApprovalGate\([^)]*,\s*\{/);
   assert.doesNotMatch(source, /\b(?:kubeRun|openGate|driftObservationMs|sleep)\s*=/);
   assert.match(source, /openApprovalGate\(boundary\.approval, input\.revision, input\.purpose, observed\)/);
+  assert.match(source, /writeApprovalGateHandoff\(gate\.binding\)/);
+  assert.match(source, /assertApprovalBoundaryUnchanged\(boundary, \{ gateExpected: true, gateBinding: gate\.binding \}\)/);
+  assert.match(source, /assertApprovalGateHandoff\(handoff\)/);
   assert.match(source, /removeOwnedApprovalGate\(gate\.ownership\)/);
 });
 
@@ -224,6 +233,19 @@ test("promotion rejects repository, replicas, duplicate tags, extra keys, and un
     values("s10-v2").replace("  pullPolicy: IfNotPresent", "  tag: s10-v2\n  pullPolicy: IfNotPresent"),
     `${values("s10-v2")}attacker: true\n`,
     values("s10-v2").replace("periodSeconds: 5", "periodSeconds: 30"),
+  ];
+  for (const candidateBytes of mutations) {
+    const value = fixture({ candidateBytes });
+    try { assert.throws(() => inspectGitCandidate({ source: value.root, revision: value.v2, currentRevision: value.v1, purpose: "promote-v2" }), /PROMOTION_VALUES_INVALID/); }
+    finally { rmSync(value.root, { recursive: true, force: true }); }
+  }
+});
+
+test("promotion rejects leading whitespace, trailing spaces, and an extra final newline", () => {
+  const mutations = [
+    ` ${values("s10-v2")}`,
+    `${values("s10-v2")} `,
+    `${values("s10-v2")}\n`,
   ];
   for (const candidateBytes of mutations) {
     const value = fixture({ candidateBytes });
@@ -290,6 +312,29 @@ test("approval boundary rejects bad marker modes, preexisting output, and symlin
     symlinkSync(real.root, linked, "dir");
     assert.throws(() => bindApprovalBoundary({ source: value.root, approval: join(linked, "approvals/v2.json"), purpose: "promote-v2" }), /(SYMLINK_ANCESTOR_FORBIDDEN|APPROVAL_PATH_FORBIDDEN)/);
   } finally { try { unlinkSync(linked); } catch { /* test cleanup */ } rmSync(real.root, { recursive: true, force: true }); rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("opener CLI rejects final and ancestor lexical source symlinks", () => {
+  const value = fixture();
+  const approval = approvalFixture(value.root);
+  const finalLink = `${value.root}-link`;
+  const ancestorLink = `${dirname(value.root)}-ancestor-link`;
+  try {
+    symlinkSync(value.root, finalLink, "dir");
+    symlinkSync(dirname(value.root), ancestorLink, "dir");
+    for (const source of [finalLink, join(ancestorLink, value.root.split("/").at(-1))]) {
+      const result = runOpener({ source, approval: approval.approval, revision: value.v2, purpose: "promote-v2" });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /SYMLINK_ANCESTOR_FORBIDDEN/);
+      assert.equal(result.stdout, "");
+      assert.equal(lstatSync(`${approval.approval}.gate.json`, { throwIfNoEntry: false }), undefined);
+    }
+  } finally {
+    try { unlinkSync(finalLink); } catch { /* test cleanup */ }
+    try { unlinkSync(ancestorLink); } catch { /* test cleanup */ }
+    rmSync(approval.root, { recursive: true, force: true });
+    rmSync(value.root, { recursive: true, force: true });
+  }
 });
 
 test("approval boundary detects marker and directory replacement races", () => {

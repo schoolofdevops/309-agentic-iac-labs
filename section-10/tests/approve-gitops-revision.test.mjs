@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { assertApprovedRevision } from "../scripts/run-gitops-lifecycle.mjs";
+import { assertApprovedRevision, openApprovalGate, readApprovalGateBinding, writeApprovalGateHandoff } from "../scripts/run-gitops-lifecycle.mjs";
 import { createApprovalFromGate, readApprovalGate } from "../scripts/approve-gitops-revision.mjs";
 
 const cli = new URL("../scripts/approve-gitops-revision.mjs", import.meta.url);
@@ -15,10 +16,8 @@ function gateFor(root, { revision = "2".repeat(40), purpose = "promote-v2" } = {
   const observed = purpose === "promote-v2"
     ? { sync: "Synced", health: "Healthy", operation: "Succeeded", revision: "1".repeat(40) }
     : { sync: "OutOfSync", replicas_after_15_seconds: 2 };
-  writeFileSync(`${output}.gate.json`, `${JSON.stringify({
-    schema: "agentic-iac-s10-approval-gate/v1", purpose, revision,
-    opened_at: "2026-08-31T00:00:00.000Z", observed,
-  })}\n`, { mode: 0o600 });
+  const opened = openApprovalGate(output, revision, purpose, observed);
+  writeApprovalGateHandoff(opened.binding);
   return { output, gate: `${output}.gate.json`, revision, purpose };
 }
 
@@ -45,6 +44,46 @@ test("learner CLI writes the exact runner-approved six-field record", () => {
   }
 });
 
+test("learner CLI rejects a gate replaced after publication and emits no accepted approval", () => {
+  for (const replacement of ["unlink", "rename"]) {
+    const root = mkdtempSync(join(tmpdir(), `agentic-iac-s10-published-gate-${replacement}-`));
+    try {
+      const input = gateFor(root);
+      const original = readFileSync(input.gate);
+      const originalMetadata = lstatSync(input.gate);
+      const parentMetadata = lstatSync(root);
+      const retained = JSON.parse(readFileSync(`${input.gate}.binding.json`, "utf8")).binding;
+      assert.deepEqual(retained.parent, {
+        path: root, device: String(parentMetadata.dev), inode: String(parentMetadata.ino),
+        owner: String(parentMetadata.uid), mode: parentMetadata.mode & 0o777,
+      });
+      assert.deepEqual(retained.file, {
+        device: String(originalMetadata.dev), inode: String(originalMetadata.ino), bytes: originalMetadata.size,
+        owner: String(originalMetadata.uid), mode: originalMetadata.mode & 0o777,
+        ctime_ms: originalMetadata.ctimeMs, mtime_ms: originalMetadata.mtimeMs,
+        identity_sha256: createHash("sha256").update(original).digest("hex"),
+      });
+      const alternate = join(root, "alternate-gate.json");
+      writeFileSync(alternate, original, { mode: 0o600 });
+      if (replacement === "unlink") {
+        rmSync(input.gate);
+        renameSync(alternate, input.gate);
+      } else {
+        renameSync(input.gate, join(root, "original-gate.json"));
+        renameSync(alternate, input.gate);
+      }
+      assert.notEqual(String(lstatSync(input.gate).ino), retained.file.inode);
+      const result = run(input);
+      assert.notEqual(result.status, 0);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /APPROVAL_GATE_CHANGED/);
+      assert.equal(existsSync(input.output), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("learner CLI rejects a stale promote gate that does not describe the prior revision", () => {
   const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-stale-approval-gate-"));
   try {
@@ -52,6 +91,8 @@ test("learner CLI rejects a stale promote gate that does not describe the prior 
     const gate = JSON.parse(readFileSync(input.gate, "utf8"));
     gate.observed.revision = input.revision;
     writeFileSync(input.gate, `${JSON.stringify(gate)}\n`, { mode: 0o600 });
+    rmSync(`${input.gate}.binding.json`);
+    writeApprovalGateHandoff(readApprovalGateBinding(input.gate));
     const result = run(input);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /APPROVAL_GATE_INVALID/);
@@ -95,11 +136,14 @@ test("learner CLI refuses malformed gates, invalid observed states, and gate-out
       const gate = JSON.parse(readFileSync(input.gate, "utf8"));
       mutate(gate);
       writeFileSync(input.gate, `${JSON.stringify(gate)}\n`, { mode: 0o600 });
+      rmSync(`${input.gate}.binding.json`);
+      writeApprovalGateHandoff(readApprovalGateBinding(input.gate));
       const result = run(input);
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /APPROVAL_GATE_INVALID/);
       assert.equal(existsSync(input.output), false);
       rmSync(input.gate);
+      rmSync(`${input.gate}.binding.json`);
       gateFor(root);
     }
     const confused = run({ ...input, gate: input.output });
@@ -138,20 +182,24 @@ test("gate reads fail closed on changed identity and an unexpected owner", () =>
   const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-gate-race-"));
   try {
     const input = gateFor(root);
+    let reads = 0;
     assert.throws(() => readApprovalGate(input.gate, {
       readFile: (_descriptor, encoding) => {
-        const raw = readFileSync(input.gate, encoding);
-        writeFileSync(input.gate, `${raw} `, { mode: 0o600 });
+        const raw = readFileSync(_descriptor, encoding);
+        reads += 1;
+        if (reads === 2) writeFileSync(input.gate, `${raw} `, { mode: 0o600 });
         return raw;
       },
-    }), /APPROVAL_GATE_CHANGED_DURING_READ/);
+    }), /APPROVAL_GATE_CHANGED/);
+    rmSync(input.gate);
+    rmSync(`${input.gate}.binding.json`);
     gateFor(root);
     assert.throws(() => readApprovalGate(input.gate, {
-      lstat: (path) => {
-        const metadata = lstatSync(path);
-        return path === input.gate ? new Proxy(metadata, { get: (target, key) => key === "uid" ? target.uid + 1 : Reflect.get(target, key, target) }) : metadata;
+      fstat: (descriptor) => {
+        const metadata = fstatSync(descriptor);
+        return new Proxy(metadata, { get: (target, key) => key === "uid" ? target.uid + 1 : Reflect.get(target, key, target) });
       },
-    }), /APPROVAL_GATE_OWNER_INVALID/);
+    }), /APPROVAL_GATE_INVALID/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
