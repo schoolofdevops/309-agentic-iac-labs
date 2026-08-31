@@ -90,10 +90,16 @@ source_revision=bb10f6d49edee4c57a7dc4d54a3c381a8392bba5 rootfs_readonly=true mo
 
 ## Collect Application evidence
 
-Check the configured target and the revision Argo CD actually resolved from
-that target.
+The Deployment can report its failed rollout before Argo CD refreshes the
+Application health projection. Wait for `Degraded`, then check the configured
+target and the revision Argo CD actually resolved from that target.
 
 ```bash
+kubectl --context kind-agentic-iac-s10 \
+  -n argocd wait \
+  --for=jsonpath='{.status.health.status}'=Degraded \
+  application/inference-platform --timeout=60s
+
 kubectl --context kind-agentic-iac-s10 \
   -n argocd get application inference-platform \
   -o custom-columns='TARGET:.spec.source.targetRevision,SYNC:.status.sync.status,HEALTH:.status.health.status,REVISION:.status.sync.revision'
@@ -102,6 +108,7 @@ kubectl --context kind-agentic-iac-s10 \
 [ sample output ]
 
 ```text
+application.argoproj.io/inference-platform condition met
 TARGET   SYNC        HEALTH     REVISION
 HEAD     OutOfSync   Degraded   bb10f6d49edee4c57a7dc4d54a3c381a8392bba5
 ```
