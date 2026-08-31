@@ -125,7 +125,7 @@ function approvalFixture(source, purpose = "promote-v2") {
   return { approval: join(approvals, purpose === "promote-v2" ? "v2.json" : "recovery.json"), approvals, marker, root, source };
 }
 
-function runtimeSnapshot({ currentRevision = "1".repeat(40), imageTag = "s10-v1", sync = "Synced", health = "Healthy" } = {}) {
+function runtimeSnapshot({ currentRevision = "1".repeat(40), imageTag = "s10-v1", images, sync = "Synced", health = "Healthy" } = {}) {
   const serverPort = "53123";
   const source = { repoURL: "git://agentic-iac-s10-git:9418/delivery.git", targetRevision: "HEAD", path: "section-10/starter/gitops/chart" };
   const destination = { server: "https://kubernetes.default.svc", namespace: "inference" };
@@ -155,7 +155,7 @@ function runtimeSnapshot({ currentRevision = "1".repeat(40), imageTag = "s10-v1"
       spec: { project: "default", source, destination, syncPolicy: { syncOptions: ["CreateNamespace=false"] } },
       status: {
         sync: { status: sync, revision: currentRevision, comparedTo: { source, destination } },
-        health: { status: health }, sourceType: "Helm", summary: { images: [`309-agentic-iac/inference-platform:${imageTag}`] },
+        health: { status: health }, sourceType: "Helm", summary: { images: images ?? [`309-agentic-iac/inference-platform:${imageTag}`] },
         operationState: { phase: "Succeeded", operation: { initiatedBy: { username: "human-platform-reviewer" }, sync: { revision: currentRevision, syncOptions: ["CreateNamespace=false"] } }, syncResult: { revision: currentRevision } },
         history: [{ revision: currentRevision, initiatedBy: { username: "human-platform-reviewer" } }],
       },
@@ -369,7 +369,8 @@ test("runtime rejects foreign kubeconfig endpoint, node, owner, and mirror evide
 
 test("recovery requires degraded OutOfSync and two current ready replicas", () => {
   const currentRevision = "2".repeat(40);
-  const accepted = runtimeSnapshot({ currentRevision, imageTag: "s10-v2", sync: "OutOfSync", health: "Degraded" });
+  const images = ["309-agentic-iac/inference-platform:s10-v2", "309-agentic-iac/inference-platform:stale-missing"];
+  const accepted = runtimeSnapshot({ currentRevision, images, sync: "OutOfSync", health: "Degraded" });
   const result = validateRuntimeSnapshot(accepted, { purpose: "revert-and-recover", currentRevision });
   assert.equal(result.deployment.readyReplicas, 2);
   const mutations = [
@@ -381,14 +382,27 @@ test("recovery requires degraded OutOfSync and two current ready replicas", () =
     (value) => { value.deployment.status.conditions[0].reason = "ReplicaSetUpdated"; },
   ];
   for (const mutate of mutations) {
-    const snapshot = runtimeSnapshot({ currentRevision, imageTag: "s10-v2", sync: "OutOfSync", health: "Degraded" }); mutate(snapshot);
+    const snapshot = runtimeSnapshot({ currentRevision, images, sync: "OutOfSync", health: "Degraded" }); mutate(snapshot);
     assert.throws(() => validateRuntimeSnapshot(snapshot, { purpose: "revert-and-recover", currentRevision }), /DRIFT_EVIDENCE_INVALID/);
+  }
+});
+
+test("recovery rejects an Application summary outside the exact current and staged images", () => {
+  const currentRevision = "2".repeat(40);
+  for (const images of [
+    ["309-agentic-iac/inference-platform:s10-v2"],
+    ["309-agentic-iac/inference-platform:s10-v2", "foreign.example/image:latest"],
+    ["309-agentic-iac/inference-platform:s10-v2", "309-agentic-iac/inference-platform:stale-missing", "foreign.example/image:latest"],
+  ]) {
+    const snapshot = runtimeSnapshot({ currentRevision, images, sync: "OutOfSync", health: "Degraded" });
+    assert.throws(() => validateRuntimeSnapshot(snapshot, { purpose: "revert-and-recover", currentRevision }), /APPLICATION_CONTRACT_INVALID/);
   }
 });
 
 test("recovery persistence rejects replacement, generation change, lost readiness, or self-heal", () => {
   const currentRevision = "2".repeat(40);
-  const before = runtimeSnapshot({ currentRevision, imageTag: "s10-v2", sync: "OutOfSync", health: "Degraded" });
+  const images = ["309-agentic-iac/inference-platform:s10-v2", "309-agentic-iac/inference-platform:stale-missing"];
+  const before = runtimeSnapshot({ currentRevision, images, sync: "OutOfSync", health: "Degraded" });
   assert.deepEqual(validateRecoveryPersistence(before, structuredClone(before), currentRevision), { sync: "OutOfSync", replicas_after_15_seconds: 2 });
   const mutations = [
     (value) => { value.deployment.metadata.uid = "replacement"; },

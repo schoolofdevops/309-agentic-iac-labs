@@ -343,8 +343,10 @@ function validateApplication(application, { currentRevision, purpose }) {
     || operation?.operation?.sync?.revision !== currentRevision || !exactArray(operation?.operation?.sync?.syncOptions, ["CreateNamespace=false"])
     || ![undefined, false].includes(operation?.operation?.sync?.prune) || operation?.syncResult?.revision !== currentRevision
     || latest?.revision !== currentRevision || latest?.initiatedBy?.username !== "human-platform-reviewer") fail("APPLICATION_OPERATION_INVALID");
-  const expectedTag = purpose === "promote-v2" ? "s10-v1" : "s10-v2";
-  if (!exactArray(application.status?.summary?.images, [`309-agentic-iac/inference-platform:${expectedTag}`])) fail("APPLICATION_CONTRACT_INVALID");
+  const expectedImages = purpose === "promote-v2"
+    ? ["309-agentic-iac/inference-platform:s10-v1"]
+    : ["309-agentic-iac/inference-platform:s10-v2", "309-agentic-iac/inference-platform:stale-missing"];
+  if (!exactArray(application.status?.summary?.images, expectedImages)) fail("APPLICATION_CONTRACT_INVALID");
 }
 
 function validateDeployment(deployment) {
