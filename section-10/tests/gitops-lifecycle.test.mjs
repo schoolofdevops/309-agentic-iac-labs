@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -28,6 +28,7 @@ import {
   waitForApprovedRevision,
   workloadRolloutTargets,
 } from "../scripts/run-gitops-lifecycle.mjs";
+import * as lifecycle from "../scripts/run-gitops-lifecycle.mjs";
 
 const sectionRoot = new URL("../", import.meta.url);
 
@@ -349,12 +350,14 @@ test("later approvals must be absent initially and a newly created exact record 
     rmSync(preloaded);
   }
   assert.doesNotThrow(() => assertLaterApprovalsAbsent([v2, revert]));
-  const gateMs = Date.now();
+  const gate = openApprovalGate(v2, revision, "promote-v2", { sync: "Synced", health: "Healthy", operation: "Succeeded", revision: "3".repeat(40) });
+  const gateMs = gate.openedAtMs;
   setTimeout(() => writeFileSync(v2, `${JSON.stringify({ schema: "agentic-iac-s10-human-approval/v1", approved_by: "human-platform-reviewer", requested_by: "agent-author", revision, purpose: "promote-v2", approved: true })}\n`, { mode: 0o600 }), 20);
-  const observed = await waitForApprovedRevision(v2, revision, "promote-v2", { gateMs, timeoutMs: 500, pollMs: 5 });
+  const observed = await waitForApprovedRevision(v2, revision, "promote-v2", { gateBinding: gate.binding, gateMs, timeoutMs: 500, pollMs: 5 });
   assert.equal(observed.revision, revision);
   assert.ok(Date.parse(observed.file.mtime) >= gateMs);
   assert.match(observed.file.identity_sha256, /^[0-9a-f]{64}$/);
+  removeOwnedApprovalGate(gate.ownership);
   rmSync(root, { recursive: true });
 });
 
@@ -365,6 +368,7 @@ test("an external approval simulator can be cancelled when the runner fails befo
     const fs=require("node:fs");
     let stopped=false;
     process.on("SIGTERM",()=>{stopped=true});
+    process.stdout.write("ready\\n");
     const deadline=Date.now()+10_000;
     const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
     (async()=>{
@@ -374,11 +378,18 @@ test("an external approval simulator can be cancelled when the runner fails befo
       }
     })().catch(error=>{console.error(error.message);process.exitCode=2});
   `;
-  const child = spawn(process.execPath, ["-e", program], { stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawn(process.execPath, ["-e", program], { stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
+  let stdout = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => { stderr += chunk; });
-  setTimeout(() => child.kill("SIGTERM"), 50);
+  await Promise.race([
+    new Promise((resolve) => child.stdout.on("data", () => stdout.includes("ready\n") && resolve())),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("simulator startup hung")), 2_000)),
+  ]);
+  child.kill("SIGTERM");
   const outcome = await Promise.race([
     new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal }))),
     new Promise((_, reject) => setTimeout(() => reject(new Error("simulator cancellation hung")), 2_000)),
@@ -430,6 +441,80 @@ test("final cleanup removes only unchanged runner-owned approval gates", () => {
   assert.throws(() => removeOwnedApprovalGate(recoveryGate.ownership), /APPROVAL_GATE_OWNERSHIP_CHANGED/);
   assert.equal(existsSync(recoveryGatePath), true);
   rmSync(root, { recursive: true });
+});
+
+test("runner binds the original gate directory and rejects a same-content gate replacement", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-gate-binding-"));
+  try {
+    const approval = join(root, "v2.json");
+    const opened = openApprovalGate(approval, "9".repeat(40), "promote-v2", { sync: "Synced", health: "Healthy", operation: "Succeeded", revision: "8".repeat(40) });
+    const gate = `${approval}.gate.json`;
+    const original = readFileSync(gate, "utf8");
+    rmSync(gate);
+    writeFileSync(gate, original, { mode: 0o600 });
+    assert.throws(() => lifecycle.assertApprovalGateBinding(opened.binding), /APPROVAL_GATE_BINDING_CHANGED/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runner rejects parent or ancestor replacement before an approval can advance", () => {
+  const outer = mkdtempSync(join(tmpdir(), "agentic-iac-s10-gate-parent-"));
+  try {
+    const parent = join(outer, "approval-parent");
+    mkdirSync(parent);
+    const approval = join(parent, "v2.json");
+    const opened = openApprovalGate(approval, "a".repeat(40), "promote-v2", { sync: "Synced", health: "Healthy", operation: "Succeeded", revision: "9".repeat(40) });
+    const moved = `${parent}-moved`;
+    renameSync(parent, moved);
+    mkdirSync(parent);
+    assert.throws(() => lifecycle.assertApprovalGateBinding(opened.binding), /APPROVAL_GATE_BINDING_CHANGED/);
+
+    rmSync(parent, { recursive: true });
+    renameSync(moved, parent);
+    const outerMoved = `${outer}-moved`;
+    renameSync(outer, outerMoved);
+    mkdirSync(outer);
+    mkdirSync(parent, { recursive: true });
+    assert.throws(() => lifecycle.assertApprovalGateBinding(opened.binding), /APPROVAL_GATE_BINDING_CHANGED/);
+    rmSync(outerMoved, { recursive: true, force: true });
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
+test("pre-sync gate substitution prevents every sync command", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-presync-binding-"));
+  try {
+    const approval = join(root, "v2.json");
+    const opened = openApprovalGate(approval, "b".repeat(40), "promote-v2", { sync: "Synced", health: "Healthy", operation: "Succeeded", revision: "a".repeat(40) });
+    const gate = `${approval}.gate.json`;
+    const original = readFileSync(gate, "utf8");
+    rmSync(gate);
+    writeFileSync(gate, original, { mode: 0o600 });
+    const calls = [];
+    assert.throws(() => lifecycle.explicitSync("b".repeat(40), [], { gateBinding: opened.binding, executor: (...args) => calls.push(args) }), /APPROVAL_GATE_BINDING_CHANGED/);
+    assert.deepEqual(calls, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("approval wait refuses a substituted runner gate before accepting an exact record", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-wait-binding-"));
+  try {
+    const approval = join(root, "v2.json");
+    const revision = "c".repeat(40);
+    const opened = openApprovalGate(approval, revision, "promote-v2", { sync: "Synced", health: "Healthy", operation: "Succeeded", revision: "b".repeat(40) });
+    const gate = `${approval}.gate.json`;
+    const original = readFileSync(gate, "utf8");
+    rmSync(gate);
+    writeFileSync(gate, original, { mode: 0o600 });
+    writeFileSync(approval, `${JSON.stringify({ schema: "agentic-iac-s10-human-approval/v1", approved_by: "human-platform-reviewer", requested_by: "agent-author", revision, purpose: "promote-v2", approved: true })}\n`, { mode: 0o600 });
+    await assert.rejects(() => waitForApprovedRevision(approval, revision, "promote-v2", { gateBinding: opened.binding, gateMs: opened.openedAtMs, timeoutMs: 50, pollMs: 1 }), /APPROVAL_GATE_BINDING_CHANGED/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("revision lineage requires direct v1-v2-recovery ancestry and a true tree recovery", () => {

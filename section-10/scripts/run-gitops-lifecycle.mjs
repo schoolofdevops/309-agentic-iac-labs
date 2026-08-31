@@ -2,7 +2,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -26,6 +26,83 @@ export const HUMAN_APPROVAL_IDENTITIES = Object.freeze({ approved_by: "human-pla
 export const HUMAN_APPROVAL_KEYS = Object.freeze(["approved", "approved_by", "purpose", "requested_by", "revision", "schema"]);
 
 function fail(code, detail = "") { throw new Error(`${code}${detail ? `: ${detail}` : ""}`); }
+
+function sameFilesystemIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size
+    && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+function approvalGateParent(path, { lstat = lstatSync } = {}) {
+  const parent = dirname(resolve(path));
+  const ancestors = [];
+  for (let current = parent; current !== dirname(current); current = dirname(current)) ancestors.unshift(current);
+  for (const ancestor of ancestors) {
+    const metadata = lstat(ancestor);
+    const macosTemporaryAlias = ancestor === "/var" && realpathSync(ancestor) === "/private/var";
+    if (metadata.isSymbolicLink() && !macosTemporaryAlias) fail("APPROVAL_GATE_ANCESTOR_CHANGED");
+  }
+  const metadata = lstat(parent);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) fail("APPROVAL_GATE_PARENT_INVALID");
+  return { path: parent, device: String(metadata.dev), inode: String(metadata.ino), owner: String(metadata.uid), mode: metadata.mode & 0o777 };
+}
+
+function sameGateParent(left, right) {
+  return left.path === right.path && left.device === right.device && left.inode === right.inode
+    && left.owner === right.owner && left.mode === right.mode;
+}
+
+function readNoFollowRegularFile(path, { lstat = lstatSync, open = openSync, fstat = fstatSync, read = readFileSync, close = closeSync } = {}) {
+  const before = lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() || (before.mode & 0o022) !== 0) fail("APPROVAL_GATE_INVALID");
+  let descriptor;
+  try {
+    descriptor = open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const opened = fstat(descriptor);
+    if (!opened.isFile() || (opened.mode & 0o022) !== 0 || !sameFilesystemIdentity(before, opened)) fail("APPROVAL_GATE_CHANGED_DURING_READ");
+    if (typeof process.getuid === "function" && opened.uid !== process.getuid()) fail("APPROVAL_GATE_OWNER_INVALID");
+    const raw = read(descriptor, "utf8");
+    const after = fstat(descriptor);
+    if (!after.isFile() || (after.mode & 0o022) !== 0 || !sameFilesystemIdentity(opened, after)) fail("APPROVAL_GATE_CHANGED_DURING_READ");
+    const pathname = lstat(path);
+    if (!pathname.isFile() || pathname.isSymbolicLink() || !sameFilesystemIdentity(after, pathname)) fail("APPROVAL_GATE_CHANGED_DURING_READ");
+    return { metadata: after, raw };
+  } finally {
+    if (descriptor != null) close(descriptor);
+  }
+}
+
+export function readApprovalGateBinding(path, options = {}) {
+  const gatePath = resolve(path);
+  const parent = approvalGateParent(gatePath, options);
+  const file = readNoFollowRegularFile(gatePath, options);
+  const afterParent = approvalGateParent(gatePath, options);
+  if (!sameGateParent(parent, afterParent)) fail("APPROVAL_GATE_PARENT_CHANGED");
+  let gate;
+  try { gate = JSON.parse(file.raw); } catch { fail("APPROVAL_GATE_INVALID"); }
+  return {
+    path: gatePath,
+    parent,
+    file: {
+      device: String(file.metadata.dev), inode: String(file.metadata.ino), bytes: file.metadata.size,
+      owner: String(file.metadata.uid), mode: file.metadata.mode & 0o777,
+      ctime_ms: file.metadata.ctimeMs, mtime_ms: file.metadata.mtimeMs, identity_sha256: sha256(file.raw),
+    },
+    gate,
+  };
+}
+
+export function assertApprovalGateBinding(binding, options = {}) {
+  let current;
+  try { current = readApprovalGateBinding(binding.path, options); } catch (error) {
+    if (/^APPROVAL_GATE_(ANCESTOR_CHANGED|PARENT_CHANGED|CHANGED_DURING_READ)/.test(error.message)) throw error;
+    fail("APPROVAL_GATE_BINDING_CHANGED");
+  }
+  if (!sameGateParent(current.parent, binding.parent)
+    || JSON.stringify(current.file) !== JSON.stringify(binding.file)
+    || current.file.identity_sha256 !== binding.file.identity_sha256
+    || JSON.stringify(current.gate) !== JSON.stringify(binding.gate)) fail("APPROVAL_GATE_BINDING_CHANGED");
+  return current;
+}
 
 export function assertRuntimeNames(names) {
   if (JSON.stringify(names) !== JSON.stringify(EXACT)) fail("RUNTIME_NAME_MISMATCH");
@@ -85,12 +162,15 @@ export function assertLaterApprovalsAbsent(paths) {
   if (preloaded.length) fail("PRELOADED_LATER_APPROVAL", String(preloaded.length));
 }
 
-export async function waitForApprovedRevision(path, revision, purpose, { gateMs, timeoutMs = 300_000, pollMs = 250, now = Date.now, sleep = delay } = {}) {
+export async function waitForApprovedRevision(path, revision, purpose, { gateBinding, gateMs, timeoutMs = 300_000, pollMs = 250, now = Date.now, sleep = delay } = {}) {
+  if (!gateBinding) fail("APPROVAL_GATE_BINDING_REQUIRED");
   const deadline = now() + timeoutMs;
   while (now() < deadline) {
+    assertApprovalGateBinding(gateBinding);
     if (existsSync(path)) {
       const approved = assertApprovedRevision(path, revision, purpose);
       if (Date.parse(approved.file.ctime) < gateMs || Date.parse(approved.file.mtime) < gateMs) fail("APPROVAL_PREDATES_GATE");
+      assertApprovalGateBinding(gateBinding);
       return approved;
     }
     await sleep(pollMs);
@@ -98,7 +178,8 @@ export async function waitForApprovedRevision(path, revision, purpose, { gateMs,
   fail("APPROVAL_WAIT_TIMEOUT", purpose);
 }
 
-export function assertApprovalUnchanged(path, revision, purpose, accepted) {
+export function assertApprovalUnchanged(path, revision, purpose, accepted, { gateBinding } = {}) {
+  if (gateBinding) assertApprovalGateBinding(gateBinding);
   const current = assertApprovedRevision(path, revision, purpose);
   if (JSON.stringify(current) !== JSON.stringify({
     schema: accepted.schema,
@@ -109,6 +190,7 @@ export function assertApprovalUnchanged(path, revision, purpose, accepted) {
     approved: accepted.approved,
     file: accepted.file,
   })) fail("APPROVAL_CHANGED_AFTER_ACCEPTANCE");
+  if (gateBinding) assertApprovalGateBinding(gateBinding);
   return current;
 }
 
@@ -792,10 +874,11 @@ async function requestResult(records) {
   fail("REQUEST_NOT_COMPLETE", id);
 }
 
-function explicitSync(revision, records) {
-  execute("kubectl", ["--context", EXACT.context, "-n", EXACT.argocdNamespace, "annotate", "application", EXACT.application, "argocd.argoproj.io/refresh=hard", "--overwrite"], { records });
+export function explicitSync(revision, records, { gateBinding, executor = execute } = {}) {
+  if (gateBinding) assertApprovalGateBinding(gateBinding);
+  executor("kubectl", ["--context", EXACT.context, "-n", EXACT.argocdNamespace, "annotate", "application", EXACT.application, "argocd.argoproj.io/refresh=hard", "--overwrite"], { records });
   const operation = JSON.stringify({ operation: { initiatedBy: { username: "human-platform-reviewer" }, sync: { revision, prune: false, syncOptions: ["CreateNamespace=false"] } } });
-  execute("kubectl", ["--context", EXACT.context, "-n", EXACT.argocdNamespace, "patch", "application", EXACT.application, "--type=merge", "-p", operation], { records });
+  executor("kubectl", ["--context", EXACT.context, "-n", EXACT.argocdNamespace, "patch", "application", EXACT.application, "--type=merge", "-p", operation], { records });
 }
 
 function inspectWorkload(records) {
@@ -824,6 +907,7 @@ function stopMirror(mirrorRoot, records) {
 
 export function openApprovalGate(path, revision, purpose, observed) {
   const gatePath = `${path}.gate.json`;
+  const parent = approvalGateParent(gatePath);
   if (existsSync(gatePath)) fail("PREEXISTING_APPROVAL_GATE", purpose);
   const openedAtMs = Date.now();
   const gate = {
@@ -834,33 +918,19 @@ export function openApprovalGate(path, revision, purpose, observed) {
     observed,
   };
   writeFileSync(gatePath, `${JSON.stringify(gate)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-  const metadata = lstatSync(gatePath);
-  const raw = readFileSync(gatePath, "utf8");
+  const binding = readApprovalGateBinding(gatePath);
+  if (!sameGateParent(parent, binding.parent) || JSON.stringify(binding.gate) !== JSON.stringify(gate)) fail("APPROVAL_GATE_BINDING_CHANGED");
   return {
     openedAtMs,
     opened_at: gate.opened_at,
-    ownership: {
-      path: gatePath,
-      device: String(metadata.dev),
-      inode: String(metadata.ino),
-      bytes: metadata.size,
-      ctime_ms: metadata.ctimeMs,
-      mtime_ms: metadata.mtimeMs,
-      identity_sha256: sha256(raw),
-    },
+    binding,
+    ownership: binding,
   };
 }
 
 export function removeOwnedApprovalGate(ownership) {
   if (!existsSync(ownership.path)) return false;
-  const before = lstatSync(ownership.path);
-  if (!before.isFile() || before.isSymbolicLink()
-    || String(before.dev) !== ownership.device || String(before.ino) !== ownership.inode
-    || before.size !== ownership.bytes || before.ctimeMs !== ownership.ctime_ms || before.mtimeMs !== ownership.mtime_ms
-    || sha256(readFileSync(ownership.path, "utf8")) !== ownership.identity_sha256) fail("APPROVAL_GATE_OWNERSHIP_CHANGED");
-  const after = lstatSync(ownership.path);
-  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
-    || before.ctimeMs !== after.ctimeMs || before.mtimeMs !== after.mtimeMs) fail("APPROVAL_GATE_OWNERSHIP_CHANGED");
+  try { assertApprovalGateBinding(ownership); } catch { fail("APPROVAL_GATE_OWNERSHIP_CHANGED"); }
   unlinkSync(ownership.path);
   if (existsSync(ownership.path)) fail("APPROVAL_GATE_CLEANUP_INCOMPLETE");
   return true;
@@ -956,13 +1026,13 @@ export async function runGitOpsLifecycle(input) {
       revision: report.observations.v1_application.sync?.revision,
     });
     gateOwnerships.push(v2Gate.ownership);
-    approvals.v2 = { gate: v2Gate.opened_at, ...(await waitForApprovedRevision(input.approvalV2, revisions.v2, "promote-v2", { gateMs: v2Gate.openedAtMs })) };
+    approvals.v2 = { gate: v2Gate.opened_at, ...(await waitForApprovedRevision(input.approvalV2, revisions.v2, "promote-v2", { gateBinding: v2Gate.binding, gateMs: v2Gate.openedAtMs })) };
 
     stopMirror(mirrorRoot, records); mirrorActive = false;
     mirror(deliveryRoot, revisions.v2, records);
     report.observations.v2_mirror = prepareAndStartMirror(deliveryRoot, revisions.v2, mirrorRoot, records); mirrorActive = true;
-    assertApprovalUnchanged(input.approvalV2, revisions.v2, "promote-v2", approvals.v2);
-    explicitSync(revisions.v2, records);
+    assertApprovalUnchanged(input.approvalV2, revisions.v2, "promote-v2", approvals.v2, { gateBinding: v2Gate.binding });
+    explicitSync(revisions.v2, records, { gateBinding: v2Gate.binding });
     report.observations.v2_application = (await waitApplication(revisions.v2, records)).status;
     waitForWorkloadRollouts(records);
     report.observations.v2_workload = inspectWorkload(records);
@@ -981,13 +1051,13 @@ export async function runGitOpsLifecycle(input) {
       replicas_after_15_seconds: drifted.replicas,
     });
     gateOwnerships.push(revertGate.ownership);
-    approvals.revert = { gate: revertGate.opened_at, ...(await waitForApprovedRevision(input.approvalRevert, revisions.revert, "revert-and-recover", { gateMs: revertGate.openedAtMs })) };
+    approvals.revert = { gate: revertGate.opened_at, ...(await waitForApprovedRevision(input.approvalRevert, revisions.revert, "revert-and-recover", { gateBinding: revertGate.binding, gateMs: revertGate.openedAtMs })) };
 
     stopMirror(mirrorRoot, records); mirrorActive = false;
     mirror(deliveryRoot, revisions.revert, records);
     report.observations.revert_mirror = prepareAndStartMirror(deliveryRoot, revisions.revert, mirrorRoot, records); mirrorActive = true;
-    assertApprovalUnchanged(input.approvalRevert, revisions.revert, "revert-and-recover", approvals.revert);
-    explicitSync(revisions.revert, records);
+    assertApprovalUnchanged(input.approvalRevert, revisions.revert, "revert-and-recover", approvals.revert, { gateBinding: revertGate.binding });
+    explicitSync(revisions.revert, records, { gateBinding: revertGate.binding });
     report.observations.recovery_application = (await waitApplication(revisions.revert, records)).status;
     waitForWorkloadRollouts(records);
     report.observations.recovery_workload = inspectWorkload(records);

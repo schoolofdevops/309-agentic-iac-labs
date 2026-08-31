@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { assertApprovedRevision } from "../scripts/run-gitops-lifecycle.mjs";
-import { readApprovalGate } from "../scripts/approve-gitops-revision.mjs";
+import { createApprovalFromGate, readApprovalGate } from "../scripts/approve-gitops-revision.mjs";
 
 const cli = new URL("../scripts/approve-gitops-revision.mjs", import.meta.url);
 
@@ -139,9 +139,9 @@ test("gate reads fail closed on changed identity and an unexpected owner", () =>
   try {
     const input = gateFor(root);
     assert.throws(() => readApprovalGate(input.gate, {
-      readFile: (path, encoding) => {
-        const raw = readFileSync(path, encoding);
-        writeFileSync(path, `${raw} `, { mode: 0o600 });
+      readFile: (_descriptor, encoding) => {
+        const raw = readFileSync(input.gate, encoding);
+        writeFileSync(input.gate, `${raw} `, { mode: 0o600 });
         return raw;
       },
     }), /APPROVAL_GATE_CHANGED_DURING_READ/);
@@ -154,5 +154,60 @@ test("gate reads fail closed on changed identity and an unexpected owner", () =>
     }), /APPROVAL_GATE_OWNER_INVALID/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("helper rejects a gate substituted after it stages an approval and removes its output", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-helper-gate-swap-"));
+  try {
+    const input = gateFor(root);
+    const original = readFileSync(input.gate, "utf8");
+    assert.throws(() => createApprovalFromGate(input, {
+      afterPublish: () => {
+        rmSync(input.gate);
+        writeFileSync(input.gate, original, { mode: 0o600 });
+      },
+    }), /APPROVAL_GATE_CHANGED/);
+    assert.equal(existsSync(input.output), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("helper rejects a substituted output path after staging without overwriting it", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentic-iac-s10-helper-output-swap-"));
+  const target = mkdtempSync(join(tmpdir(), "agentic-iac-s10-helper-output-target-"));
+  try {
+    const input = gateFor(root);
+    assert.throws(() => createApprovalFromGate(input, {
+      afterPublish: () => {
+        rmSync(input.output);
+        symlinkSync(join(target, "foreign.json"), input.output);
+      },
+    }), /APPROVAL_RECORD_INVALID/);
+    assert.equal(lstatSync(input.output).isSymbolicLink(), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test("helper rejects an approval-directory swap after staging and leaves no temporary file", () => {
+  const outer = mkdtempSync(join(tmpdir(), "agentic-iac-s10-helper-parent-swap-"));
+  const root = join(outer, "approval-directory");
+  mkdirSync(root);
+  try {
+    const input = gateFor(root);
+    const moved = `${root}-moved`;
+    assert.throws(() => createApprovalFromGate(input, {
+      afterPublish: () => {
+        renameSync(root, moved);
+        mkdirSync(root);
+      },
+    }), /APPROVAL_GATE_CHANGED/);
+    assert.equal(existsSync(input.output), false);
+    assert.equal(readdirSync(moved).some((name) => name.endsWith(".tmp")), false);
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
   }
 });

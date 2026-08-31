@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 import { randomBytes } from "node:crypto";
-import { closeSync, fchmodSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, parse, resolve, sep } from "node:path";
+import { closeSync, fchmodSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, parse, resolve } from "node:path";
 
-import { HUMAN_APPROVAL_IDENTITIES, HUMAN_APPROVAL_SCHEMA, assertApprovedRevision } from "./run-gitops-lifecycle.mjs";
+import { HUMAN_APPROVAL_IDENTITIES, HUMAN_APPROVAL_SCHEMA, assertApprovalGateBinding, assertApprovedRevision, readApprovalGateBinding } from "./run-gitops-lifecycle.mjs";
 
 const GATE_SCHEMA = "agentic-iac-s10-approval-gate/v1";
 const GATE_SUFFIX = ".gate.json";
@@ -28,55 +28,27 @@ function sameIdentity(left, right) {
     && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
 }
 
-function assertNoSymlinkAncestors(path, { lstat = lstatSync } = {}) {
-  const absolute = resolve(path);
-  const { root } = parse(absolute);
-  let current = root;
-  for (const component of absolute.slice(root.length).split(sep).filter(Boolean)) {
-    current = resolve(current, component);
-    const metadata = lstat(current);
-    // macOS exposes its normal temporary area through /var -> /private/var.
-    // It is an OS path alias, not a learner-controlled approval boundary.
-    const macosTemporaryAlias = current === "/var" && realpathSync(current) === "/private/var";
-    if (metadata.isSymbolicLink() && !macosTemporaryAlias) fail("SYMLINK_PATH_FORBIDDEN");
-  }
-  return absolute;
-}
-
-function assertSafeGateMetadata(metadata) {
-  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) fail("APPROVAL_GATE_INVALID");
-  if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) fail("APPROVAL_GATE_OWNER_INVALID");
-}
-
 export function readApprovalGate(path, { lstat = lstatSync, readFile = readFileSync } = {}) {
-  let absolute;
-  let before;
-  try {
-    absolute = assertNoSymlinkAncestors(path, { lstat });
-    before = lstat(absolute);
-  } catch (error) {
-    if (error?.message === "SYMLINK_PATH_FORBIDDEN") throw error;
-    fail("APPROVAL_GATE_INVALID");
+  let declared;
+  try { declared = lstat(path); } catch { fail("APPROVAL_GATE_INVALID"); }
+  if (!declared.isFile() || declared.isSymbolicLink() || (declared.mode & 0o077) !== 0) fail("APPROVAL_GATE_INVALID");
+  if (typeof process.getuid === "function" && declared.uid !== process.getuid()) fail("APPROVAL_GATE_OWNER_INVALID");
+  let binding;
+  try { binding = readApprovalGateBinding(path, { lstat, read: readFile }); } catch (error) {
+    if (error?.message === "APPROVAL_GATE_ANCESTOR_CHANGED") fail("SYMLINK_PATH_FORBIDDEN");
+    throw error;
   }
-  assertSafeGateMetadata(before);
-  let value;
-  try { value = JSON.parse(readFile(absolute, "utf8")); } catch { fail("APPROVAL_GATE_INVALID"); }
+  const value = binding.gate;
   if (!sameKeys(value, GATE_KEYS) || value.schema !== GATE_SCHEMA || !isRevision(value.revision)
     || typeof value.purpose !== "string" || typeof value.opened_at !== "string"
     || !Number.isFinite(Date.parse(value.opened_at)) || !Object.hasOwn(FROZEN_PURPOSES, value.purpose)
     || !FROZEN_PURPOSES[value.purpose](value.observed)
     || (value.purpose === "promote-v2" && value.observed.revision === value.revision)) fail("APPROVAL_GATE_INVALID");
-  let after;
-  try { after = lstat(absolute); } catch { fail("APPROVAL_GATE_CHANGED_DURING_READ"); }
-  assertSafeGateMetadata(after);
-  if (!sameIdentity(before, after)) fail("APPROVAL_GATE_CHANGED_DURING_READ");
-  return { path: absolute, metadata: after, value };
+  return { path: binding.path, metadata: binding.file, value, binding };
 }
 
 function assertGateUnchanged(accepted) {
-  const current = readApprovalGate(accepted.path);
-  if (!sameIdentity(current.metadata, accepted.metadata)
-    || JSON.stringify(current.value) !== JSON.stringify(accepted.value)) fail("APPROVAL_GATE_CHANGED");
+  try { assertApprovalGateBinding(accepted.binding); } catch { fail("APPROVAL_GATE_CHANGED"); }
 }
 
 function parseArgs(argv) {
@@ -104,10 +76,13 @@ function createTemporaryApproval(output, bytes) {
       writeFileSync(descriptor, bytes, "utf8");
       fsyncSync(descriptor);
       closeSync(descriptor);
+      descriptor = undefined;
       return temporary;
     } catch (error) {
-      if (descriptor != null) closeSync(descriptor);
-      try { unlinkSync(temporary); } catch (cleanupError) { if (cleanupError?.code !== "ENOENT") throw cleanupError; }
+      if (descriptor != null) {
+        try { closeSync(descriptor); } catch { /* The original write failure remains authoritative. */ }
+      }
+      try { unlinkSync(temporary); } catch { /* Best effort; never mask the original failure. */ }
       if (error?.code !== "EEXIST") throw error;
     }
   }
@@ -117,17 +92,16 @@ function createTemporaryApproval(output, bytes) {
 function removeOnlyCreatedOutput(path, expected) {
   try {
     const current = lstatSync(path);
-    if (current.isFile() && !current.isSymbolicLink() && sameIdentity(current, expected)) unlinkSync(path);
+    if (current.isFile() && !current.isSymbolicLink() && current.dev === expected.dev && current.ino === expected.ino) unlinkSync(path);
   } catch { /* Fail closed: never remove a replacement. */ }
 }
 
-export function createApprovalFromGate({ gate, output, revision, purpose }) {
+export function createApprovalFromGate({ gate, output, revision, purpose }, { afterPublish = () => {} } = {}) {
   if (!isRevision(revision) || !Object.hasOwn(FROZEN_PURPOSES, purpose)) fail("INPUT_INVALID");
   const accepted = readApprovalGate(gate);
   const expectedOutput = accepted.path.slice(0, -GATE_SUFFIX.length);
   const requestedOutput = resolve(output);
   if (!accepted.path.endsWith(GATE_SUFFIX) || requestedOutput !== expectedOutput || dirname(requestedOutput) !== dirname(accepted.path)) fail("APPROVAL_PATH_FORBIDDEN");
-  assertNoSymlinkAncestors(dirname(requestedOutput));
   try { lstatSync(requestedOutput); fail("APPROVAL_OUTPUT_EXISTS"); } catch (error) { if (error?.code !== "ENOENT") throw error; }
   if (accepted.value.revision !== revision) fail("UNAPPROVED_REVISION");
   if (accepted.value.purpose !== purpose) fail("APPROVAL_PURPOSE_MISMATCH");
@@ -136,22 +110,27 @@ export function createApprovalFromGate({ gate, output, revision, purpose }) {
     schema: HUMAN_APPROVAL_SCHEMA, approved_by: HUMAN_APPROVAL_IDENTITIES.approved_by, requested_by: HUMAN_APPROVAL_IDENTITIES.requested_by,
     revision, purpose, approved: true,
   })}\n`;
+  assertGateUnchanged(accepted);
   const temporary = createTemporaryApproval(requestedOutput, bytes);
   let created;
   try {
     assertGateUnchanged(accepted);
-    linkSync(temporary, requestedOutput);
+    try { linkSync(temporary, requestedOutput); } catch (error) {
+      if (error?.code === "EEXIST") fail("APPROVAL_OUTPUT_EXISTS");
+      throw error;
+    }
     created = lstatSync(requestedOutput);
     if (!created.isFile() || created.isSymbolicLink() || (created.mode & 0o777) !== 0o600 || !sameIdentity(created, lstatSync(temporary))) fail("APPROVAL_OUTPUT_INVALID");
-    assertGateUnchanged(accepted);
     unlinkSync(temporary);
+    afterPublish();
+    assertGateUnchanged(accepted);
     assertApprovedRevision(requestedOutput, revision, purpose);
     return { revision, purpose };
   } catch (error) {
     if (created) removeOnlyCreatedOutput(requestedOutput, created);
     throw error;
   } finally {
-    try { unlinkSync(temporary); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+    try { unlinkSync(temporary); } catch { /* Best effort; primary validation failures must remain visible. */ }
   }
 }
 
