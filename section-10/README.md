@@ -9,6 +9,25 @@ The candidate is inert: its workflow lives below `starter/`, not in a
 repository-root `.github/workflows` directory. The evaluator never applies,
 deploys, syncs, or changes a cluster.
 
+## Load local images into the course Kind node
+
+Kind 0.27 can create the pinned course node but cannot load images through its
+built-in helper when that node uses containerd configuration version 4. Use
+the same course command with Kind 0.27 or Kind 0.32:
+
+```console
+node section-10/scripts/load-kind-images.mjs \
+  --cluster agentic-iac-s10 \
+  <local-image> [<local-image> ...]
+```
+
+The helper checks that `agentic-iac-s10-control-plane` belongs to the named
+Kind cluster and that every image exists locally before transfer. It streams
+each Docker image archive into the disposable node's containerd image store
+and stops with the image name when a transfer fails. The transfer uses
+privileged containerd access only inside that local node. It does not change
+the workload security context.
+
 Run the evaluator from a separate checkout of the human-approved base commit.
 The starter branch is data only. Give the evaluator the approved base SHA, the
 candidate SHA, and a new evidence directory below your operating-system
